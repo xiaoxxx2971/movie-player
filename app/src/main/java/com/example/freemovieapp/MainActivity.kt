@@ -49,16 +49,20 @@ class MainActivity : ComponentActivity() {
                             DetailScreen(
                                 movieId = movieId,
                                 onBackClick = { navController.popBackStack() },
-                                onPlayClick = { id, epIndex ->
-                                    navController.navigate("player/$id?epIndex=$epIndex")
+                                onPlayClick = { id, sourceIndex, epIndex ->
+                                    navController.navigate("player/$id?sourceIndex=$sourceIndex&epIndex=$epIndex")
                                 }
                             )
                         }
 
                         composable(
-                            route = "player/{movieId}?epIndex={epIndex}",
+                            route = "player/{movieId}?sourceIndex={sourceIndex}&epIndex={epIndex}",
                             arguments = listOf(
                                 navArgument("movieId") { type = NavType.StringType },
+                                navArgument("sourceIndex") {
+                                    type = NavType.IntType
+                                    defaultValue = 0
+                                },
                                 navArgument("epIndex") {
                                     type = NavType.IntType
                                     defaultValue = 0
@@ -66,9 +70,11 @@ class MainActivity : ComponentActivity() {
                             )
                         ) { backStackEntry ->
                             val movieId = backStackEntry.arguments?.getString("movieId") ?: ""
+                            val sourceIndex = backStackEntry.arguments?.getInt("sourceIndex") ?: 0
                             val epIndex = backStackEntry.arguments?.getInt("epIndex") ?: 0
                             PlayerScreen(
                                 movieId = movieId,
+                                initialSourceIndex = sourceIndex,
                                 initialEpisodeIndex = epIndex,
                                 onBackClick = { navController.popBackStack() }
                             )

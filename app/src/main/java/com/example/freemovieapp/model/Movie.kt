@@ -5,6 +5,11 @@ data class Episode(
     val url: String
 )
 
+data class VideoSource(
+    val name: String,
+    val episodes: List<Episode>
+)
+
 data class Movie(
     val id: String,
     val title: String,
@@ -15,6 +20,7 @@ data class Movie(
     val description: String,
     val posterUrl: String,
     val backdropUrl: String,
+    val sources: List<VideoSource>,
     val episodes: List<Episode>,
     val isFeatured: Boolean = false
 ) {

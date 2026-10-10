@@ -14,6 +14,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -43,17 +44,25 @@ fun HomeScreen(
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
 
-    var searchQuery by remember { mutableStateOf("") }
+    // 初始化时直接复用内存缓存，如果是搜索后返回则直接显示搜索结果，实现 0 秒瞬时返回
+    var searchQuery by remember { mutableStateOf(MovieRepository.lastSearchQuery) }
     var selectedCategory by remember { mutableStateOf("全部") }
-    var isLoading by remember { mutableStateOf(true) }
-    var movieList by remember { mutableStateOf<List<Movie>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(MovieRepository.cachedHomeMovies.isEmpty() && MovieRepository.cachedSearchResults.isEmpty()) }
+    var movieList by remember {
+        mutableStateOf(
+            if (MovieRepository.lastSearchQuery.isNotBlank() && MovieRepository.cachedSearchResults.isNotEmpty()) {
+                MovieRepository.cachedSearchResults
+            } else {
+                MovieRepository.cachedHomeMovies
+            }
+        )
+    }
 
-    // 动态提取分类列表
+    // 动态提取分类
     val categories = remember(movieList) {
         listOf("全部") + movieList.map { it.category }.distinct()
     }
 
-    // 根据分类过滤展示
     val displayedMovies = remember(movieList, selectedCategory) {
         if (selectedCategory == "全部") {
             movieList
@@ -62,11 +71,13 @@ fun HomeScreen(
         }
     }
 
-    // 首次加载最新热门影视
+    // 仅当内存缓存完全为空时才在首次发起网络请求
     LaunchedEffect(Unit) {
-        isLoading = true
-        movieList = MovieRepository.fetchLatestMovies()
-        isLoading = false
+        if (movieList.isEmpty()) {
+            isLoading = true
+            movieList = MovieRepository.fetchLatestMovies()
+            isLoading = false
+        }
     }
 
     fun executeSearch() {
@@ -75,6 +86,18 @@ fun HomeScreen(
             isLoading = true
             selectedCategory = "全部"
             movieList = MovieRepository.searchOnlineMovies(searchQuery)
+            isLoading = false
+        }
+    }
+
+    fun forceRefresh() {
+        coroutineScope.launch {
+            isLoading = true
+            searchQuery = ""
+            selectedCategory = "全部"
+            MovieRepository.lastSearchQuery = ""
+            MovieRepository.cachedSearchResults = emptyList()
+            movieList = MovieRepository.fetchLatestMovies(forceRefresh = true)
             isLoading = false
         }
     }
@@ -92,13 +115,22 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "ONLINE",
+                            text = "1080P 超清",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.Black,
                             modifier = Modifier
                                 .background(AccentGold, RoundedCornerShape(4.dp))
                                 .padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { forceRefresh() }) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "刷新",
+                            tint = Color.White
                         )
                     }
                 },
@@ -118,7 +150,7 @@ fun HomeScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("输入电影、电视剧片名，按回车搜索...", color = TextSecondary, fontSize = 13.sp) },
+                placeholder = { Text("搜索电影、电视剧全网 1080P...", color = TextSecondary, fontSize = 13.sp) },
                 leadingIcon = {
                     IconButton(onClick = { executeSearch() }) {
                         Icon(imageVector = Icons.Default.Search, contentDescription = "搜索", tint = NetflixRed)
@@ -152,7 +184,6 @@ fun HomeScreen(
             )
 
             if (isLoading) {
-                // 加载中转圈提示
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -162,11 +193,10 @@ fun HomeScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = NetflixRed)
                         Spacer(modifier = Modifier.height(12.dp))
-                        Text(text = "正在连接影视库...", color = TextSecondary, fontSize = 13.sp)
+                        Text(text = "正在极速载入影视库...", color = TextSecondary, fontSize = 13.sp)
                     }
                 }
             } else if (movieList.isEmpty()) {
-                // 搜索无结果
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -174,13 +204,13 @@ fun HomeScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "未搜索到相关影片，换个片名试试吧",
+                        text = "未搜索到相关影片，换个关键词试试吧",
                         color = TextSecondary,
                         fontSize = 14.sp
                     )
                 }
             } else {
-                // 顶部 Banner（首部推荐）
+                // 顶部推荐 Banner
                 val bannerMovie = movieList.firstOrNull()
                 if (searchQuery.isBlank() && bannerMovie != null) {
                     Box(
@@ -212,7 +242,7 @@ fun HomeScreen(
                                 .padding(12.dp)
                         ) {
                             Text(
-                                text = "今日精选推荐",
+                                text = "今日精选推荐 · 1080P",
                                 fontSize = 11.sp,
                                 color = AccentGold,
                                 fontWeight = FontWeight.Bold
