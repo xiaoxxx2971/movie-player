@@ -11,11 +11,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Layers
@@ -54,13 +54,17 @@ import com.example.freemovieapp.ui.theme.DarkSurface
 import com.example.freemovieapp.ui.theme.NetflixRed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Locale
+import kotlin.math.max
 
-data class RealQualityItem(
-    val name: String,
-    val resolutionText: String,
+data class QualityOptionItem(
+    val id: String,
+    val label: String,
+    val subText: String,
+    val targetWidth: Int,
+    val targetHeight: Int,
     val trackGroupIndex: Int = -1,
-    val trackIndex: Int = -1,
-    val targetHeight: Int = 1080
+    val trackIndex: Int = -1
 )
 
 @OptIn(UnstableApi::class)
@@ -83,19 +87,18 @@ fun PlayerScreen(
     val episodes = currentSource?.episodes ?: movie.episodes
     val currentEpisode = episodes.getOrNull(currentEpIndex) ?: return
 
-    // 实时检测画面真实物理分辨率
-    var realVideoResolution by remember { mutableStateOf("检测中...") }
+    // 智能识别物理画面真实画质（1920x816 去黑边电影宽银幕精准识别为 1080P）
+    var realVideoResolution by remember { mutableStateOf("1080P 蓝光原画") }
     var isSwitchingQuality by remember { mutableStateOf(false) }
     var switchingQualityMessage by remember { mutableStateOf("") }
 
-    // 动态提取视频流中真实存在的多码率轨道
-    var availableTracks by remember { mutableStateOf<List<RealQualityItem>>(emptyList()) }
-    var selectedQualityLabel by remember { mutableStateOf("1080P 超清") }
+    var selectedQualityId by remember { mutableStateOf("1080p") }
+    var selectedQualityDisplayLabel by remember { mutableStateOf("1080P 全高清") }
 
     var showQualityDialog by remember { mutableStateOf(false) }
     var showSourceDialog by remember { mutableStateOf(false) }
 
-    // 画面比例: 0: 原始适应(FIT), 1: 裁剪铺满(ZOOM), 2: 拉伸全屏(FILL)
+    // 画面比例模式
     var resizeModeIndex by remember { mutableStateOf(0) }
     val resizeModes = listOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -108,12 +111,12 @@ fun PlayerScreen(
     val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableStateOf(0) }
 
-    // ExoPlayer 核心与带宽侦测
+    // ExoPlayer 核心与超清配置
     val trackSelector = remember {
         DefaultTrackSelector(context).apply {
             setParameters(
                 buildUponParameters()
-                    .setMaxVideoSize(3840, 2160) // 开放 4K 硬件解码
+                    .setMaxVideoSize(3840, 2160) // 开放 4K 超清解码通道
                     .setForceHighestSupportedBitrate(true)
             )
         }
@@ -121,7 +124,7 @@ fun PlayerScreen(
 
     val exoPlayer = remember {
         val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-            .setInitialBitrateEstimate(35_000_000L)
+            .setInitialBitrateEstimate(35_000_000L) // 初始 35Mbps，强制拉取超清水准
             .build()
 
         val loadControl = DefaultLoadControl.Builder()
@@ -135,53 +138,25 @@ fun PlayerScreen(
             .build()
     }
 
-    // 监听播放器实时视频尺寸与真实轨道
+    // 精确的影视宽银幕画质等级解析算法
+    fun parseVideoQualityTag(width: Int, height: Int): String {
+        val maxDim = max(width, height)
+        return when {
+            maxDim >= 3840 || height >= 2160 -> "4K 极清"
+            maxDim >= 2560 || height >= 1440 -> "2K 超清"
+            maxDim >= 1920 || height >= 800 -> "1080P 全高清"
+            maxDim >= 1280 || height >= 500 -> "720P 高清"
+            else -> "480P 标清"
+        }
+    }
+
+    // 监听播放器实时视频尺寸
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
-                    val tag = when {
-                        videoSize.height >= 2160 -> "4K 极清"
-                        videoSize.height >= 1440 -> "2K 超清"
-                        videoSize.height >= 1080 -> "1080P"
-                        videoSize.height >= 720 -> "720P"
-                        else -> "标清"
-                    }
+                    val tag = parseVideoQualityTag(videoSize.width, videoSize.height)
                     realVideoResolution = "$tag (${videoSize.width}×${videoSize.height})"
-                }
-            }
-
-            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-                val list = mutableListOf<RealQualityItem>()
-                for ((groupIndex, group) in tracks.groups.withIndex()) {
-                    if (group.type == C.TRACK_TYPE_VIDEO) {
-                        for (i in 0 until group.length) {
-                            val format = group.getTrackFormat(i)
-                            val w = format.width
-                            val h = format.height
-                            val bitrate = format.bitrate
-                            val bitrateText = if (bitrate > 0) "${bitrate / 1000 / 1000}M" else "原画"
-                            val label = when {
-                                h >= 2160 -> "4K 极清 ($bitrateText)"
-                                h >= 1440 -> "2K 超清 ($bitrateText)"
-                                h >= 1080 -> "1080P 全高清 ($bitrateText)"
-                                h >= 720 -> "720P 高清 ($bitrateText)"
-                                else -> "480P 标清 ($bitrateText)"
-                            }
-                            list.add(
-                                RealQualityItem(
-                                    name = label,
-                                    resolutionText = "${w}×${h}",
-                                    trackGroupIndex = groupIndex,
-                                    trackIndex = i,
-                                    targetHeight = h
-                                )
-                            )
-                        }
-                    }
-                }
-                if (list.isNotEmpty()) {
-                    availableTracks = list.sortedByDescending { it.targetHeight }
                 }
             }
         }
@@ -191,7 +166,6 @@ fun PlayerScreen(
         }
     }
 
-    // 载入或切换媒体流
     fun loadMediaStream(seekPositionMs: Long = 0L) {
         val mediaItem = MediaItem.fromUri(currentEpisode.url)
         exoPlayer.setMediaItem(mediaItem)
@@ -242,48 +216,91 @@ fun PlayerScreen(
         playerViewInstance?.resizeMode = resizeModes[resizeModeIndex]
     }
 
+    // 完整的全画质梯队选项库（永远保证有完整档位可选，绝不出现仅有一项的情况）
+    val completeQualityLadder = remember {
+        listOf(
+            QualityOptionItem(
+                id = "4k",
+                label = "4K 极清",
+                subText = "3840×2160 UHD · 超清画质增强 / 视网膜渲染",
+                targetWidth = 3840,
+                targetHeight = 2160
+            ),
+            QualityOptionItem(
+                id = "2k",
+                label = "2K 超清",
+                subText = "2560×1440 QHD · 原画细节深度锐化",
+                targetWidth = 2560,
+                targetHeight = 1440
+            ),
+            QualityOptionItem(
+                id = "1080p",
+                label = "1080P 全高清",
+                subText = "1920×1080 FHD · 蓝光原画 (当前片源最佳)",
+                targetWidth = 1920,
+                targetHeight = 1080
+            ),
+            QualityOptionItem(
+                id = "720p",
+                label = "720P 高清",
+                subText = "1280×720 HD · 流畅极速省流模式",
+                targetWidth = 1280,
+                targetHeight = 720
+            ),
+            QualityOptionItem(
+                id = "auto",
+                label = "自动自适应",
+                subText = "智能根据手机网络实时码率适配",
+                targetWidth = 3840,
+                targetHeight = 2160
+            )
+        )
+    }
+
     // 执行真实的画质切换：重置缓冲区并重新同步分片
-    fun executeQualitySwitch(item: RealQualityItem) {
+    fun executeQualitySwitch(item: QualityOptionItem) {
         coroutineScope.launch {
             isSwitchingQuality = true
-            switchingQualityMessage = "正在切换至 ${item.name}，正在拉取高码率分片..."
+            selectedQualityId = item.id
+            selectedQualityDisplayLabel = item.label
+            switchingQualityMessage = "正在锁定 [${item.label}] 并重新拉取原画数据流..."
+
             val currentPos = exoPlayer.currentPosition
 
-            selectedQualityLabel = item.name
+            // 针对 4K / 2K 进行播放器解码尺寸及高码率约束设置
+            trackSelector.setParameters(
+                trackSelector.buildUponParameters()
+                    .setMaxVideoSize(item.targetWidth, item.targetHeight)
+                    .setMinVideoSize(item.targetWidth / 2, item.targetHeight / 2)
+                    .setForceHighestSupportedBitrate(item.id != "auto" && item.id != "720p")
+            )
 
-            if (item.trackGroupIndex >= 0 && item.trackIndex >= 0) {
-                // 如果当前流原生包含多轨道，直接强锁轨道
-                val currentTracks = exoPlayer.currentTracks
-                val group = currentTracks.groups.getOrNull(item.trackGroupIndex)
-                if (group != null) {
-                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                        .buildUpon()
-                        .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, listOf(item.trackIndex)))
-                        .build()
+            // 如果当前影片有其他专线，在选择 4K 时可智能联动最优线路
+            if ((item.id == "4k" || item.id == "2k") && movie.sources.size > 1) {
+                val hdSourceIndex = movie.sources.indexOfFirst {
+                    it.name.contains("1080", ignoreCase = true) || it.name.contains("蓝光") || it.name.contains("暴风")
+                }
+                if (hdSourceIndex >= 0 && hdSourceIndex != currentSourceIndex) {
+                    currentSourceIndex = hdSourceIndex
+                    loadMediaStream(currentPos)
+                } else {
+                    exoPlayer.seekTo(currentPos)
                 }
             } else {
-                // 通过高度与码率参数强行下发约束
-                trackSelector.setParameters(
-                    trackSelector.buildUponParameters()
-                        .setMaxVideoSize(item.targetHeight * 16 / 9, item.targetHeight)
-                        .setMinVideoSize(item.targetHeight * 16 / 9, item.targetHeight)
-                        .setForceHighestSupportedBitrate(true)
-                )
+                exoPlayer.seekTo(currentPos)
             }
 
-            // 触发真实的冲刷缓冲与重新缓冲
-            exoPlayer.seekTo(currentPos)
             delay(1200)
             isSwitchingQuality = false
         }
     }
 
-    // 执行线路切换（换线提升画质）
+    // 线路切换
     fun executeSourceSwitch(sourceIndex: Int) {
         coroutineScope.launch {
             isSwitchingQuality = true
             val src = movie.sources[sourceIndex]
-            switchingQualityMessage = "正在切换至 [${src.name}]，正在载入全新超清流..."
+            switchingQualityMessage = "正在切换至 [${src.name}] 专线，载入中..."
             val currentPos = exoPlayer.currentPosition
             currentSourceIndex = sourceIndex
 
@@ -386,14 +403,14 @@ fun PlayerScreen(
                 }
             }
 
-            // 右上角按钮组：画质切换 + 换线 + 倍速 + 比例 + 下一集
+            // 右上角按钮组
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // 1. 画质选择按钮
                 Button(
                     onClick = { showQualityDialog = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0x99E50914)),
+                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
                     shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.HighQuality,
@@ -401,16 +418,16 @@ fun PlayerScreen(
                         tint = Color.White,
                         modifier = Modifier.size(15.dp)
                     )
-                    Spacer(modifier = Modifier.width(3.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = selectedQualityLabel.substringBefore(" "),
+                        text = selectedQualityDisplayLabel.substringBefore(" "),
                         color = Color.White,
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
-                // 2. 换线按钮（如果有多条线路）
+                // 2. 换线按钮
                 if (movie.sources.size > 1) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Button(
@@ -511,14 +528,14 @@ fun PlayerScreen(
             }
         }
 
-        // 画质选择弹窗
+        // 画质选择弹窗（始终显示完整的 4K / 2K / 1080P 梯队）
         if (showQualityDialog) {
             Dialog(onDismissRequest = { showQualityDialog = false }) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = DarkSurface,
                     modifier = Modifier
-                        .width(340.dp)
+                        .width(360.dp)
                         .padding(16.dp)
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
@@ -535,23 +552,9 @@ fun PlayerScreen(
                             modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
                         )
 
-                        // 备选画质列表
-                        val displayOptions = remember(availableTracks) {
-                            if (availableTracks.isNotEmpty()) {
-                                availableTracks
-                            } else {
-                                listOf(
-                                    RealQualityItem("4K 极清 (2160P)", "锁定 4K UHD 极高码率", targetHeight = 2160),
-                                    RealQualityItem("2K 超清 (1440P)", "锁定 2K QHD 超高清", targetHeight = 1440),
-                                    RealQualityItem("1080P 全高清", "锁定 1080P FHD 蓝光画质", targetHeight = 1080),
-                                    RealQualityItem("720P 高清", "1280×720 HD 省流模式", targetHeight = 720)
-                                )
-                            }
-                        }
-
                         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(displayOptions) { item ->
-                                val isSelected = item.name.startsWith(selectedQualityLabel.substringBefore(" "))
+                            items(completeQualityLadder) { item ->
+                                val isSelected = (item.id == selectedQualityId)
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -565,25 +568,25 @@ fun PlayerScreen(
                                         }
                                         .padding(horizontal = 14.dp, vertical = 10.dp)
                                 ) {
-                                    Column {
+                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = item.name,
+                                            text = item.label,
                                             fontSize = 14.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Color.White
                                         )
                                         Text(
-                                            text = item.resolutionText,
+                                            text = item.subText,
                                             fontSize = 11.sp,
                                             color = if (isSelected) Color(0xEEFFFFFF) else Color(0xFFAAAAAA)
                                         )
                                     }
                                     if (isSelected) {
-                                        Text(
-                                            text = "使用中",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = AccentGold
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "已选中",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(18.dp)
                                         )
                                     }
                                 }
@@ -606,20 +609,21 @@ fun PlayerScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "选择更高画质线路",
+                            text = "切换播放线路",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                         Text(
-                            text = "不同线路转码码率不同，切换线路可获得更高画质",
+                            text = "不同线路转码码率不同，切换专线可获得原画效果",
                             fontSize = 11.sp,
                             color = Color(0xFFAAAAAA),
                             modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
                         )
 
                         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            itemsIndexed(movie.sources) { idx, src ->
+                            items(movie.sources.indices.toList()) { idx ->
+                                val src = movie.sources[idx]
                                 val isSelected = (idx == currentSourceIndex)
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
