@@ -1,5 +1,10 @@
 package com.example.freemovieapp.model
 
+data class Episode(
+    val name: String,
+    val url: String
+)
+
 data class Movie(
     val id: String,
     val title: String,
@@ -10,6 +15,9 @@ data class Movie(
     val description: String,
     val posterUrl: String,
     val backdropUrl: String,
-    val videoUrl: String,
+    val episodes: List<Episode>,
     val isFeatured: Boolean = false
-)
+) {
+    val defaultVideoUrl: String
+        get() = episodes.firstOrNull()?.url ?: ""
+}

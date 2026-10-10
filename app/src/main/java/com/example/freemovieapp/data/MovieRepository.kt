@@ -1,5 +1,6 @@
 package com.example.freemovieapp.data
 
+import com.example.freemovieapp.model.Episode
 import com.example.freemovieapp.model.Movie
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -12,17 +13,17 @@ import java.net.URLEncoder
 
 object MovieRepository {
 
-    // 默认内置的公开多线路影视 API
+    // 默认内置高质量公开影视接口（优先 1080P 高清切片流）
     var currentApiEndpoint = "https://cj.lziapi.com/api.php/provide/vod/"
     private val backupApiEndpoints = listOf(
+        "https://api.bfzyapi.com/api.php/provide/vod/",
         "https://api.wujinapi.me/api.php/provide/vod/",
         "https://caiji.dbzy.tv/api.php/provide/vod/at/json/"
     )
 
-    // 缓存数据供详情页获取
     private val movieCache = mutableMapOf<String, Movie>()
 
-    // 本地高质量兜底片单（确保离线或弱网下也有内容展示）
+    // 本地高清兜底片单
     private val fallbackMovies = listOf(
         Movie(
             id = "fb_1",
@@ -31,10 +32,13 @@ object MovieRepository {
             year = "2008",
             rating = 8.5,
             duration = "10 分钟",
-            description = "Blender 开源基金会经典动画短片，讲述森林中温和的大兔子智斗三只恶作剧松鼠的幽默故事。",
+            description = "Blender 开源基金会 4K 超清动画短片，讲述森林中温和的大兔子智斗三只恶作剧松鼠的幽默故事。",
             posterUrl = "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=500&q=80",
             backdropUrl = "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=1000&q=80",
-            videoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+            episodes = listOf(
+                Episode("正片 1080P", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"),
+                Episode("预告片", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4")
+            ),
             isFeatured = true
         ),
         Movie(
@@ -44,23 +48,12 @@ object MovieRepository {
             year = "2012",
             rating = 8.1,
             duration = "12 分钟",
-            description = "在反乌托邦未来的阿姆斯特丹，一群科学家试图通过时空全息技术挽救昔日恋人与毁灭的世界。",
+            description = "阿姆斯特丹反乌托邦未来的高清 CGI 短片，年轻科学家试图通过时空全息技术挽救昔日恋人与毁灭的世界。",
             posterUrl = "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=500&q=80",
             backdropUrl = "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1000&q=80",
-            videoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
-            isFeatured = true
-        ),
-        Movie(
-            id = "fb_3",
-            title = "辛特尔之龙 (Sintel)",
-            category = "奇幻",
-            year = "2010",
-            rating = 8.8,
-            duration = "15 分钟",
-            description = "流浪女孩 Sintel 荒漠救下幼龙，幼龙被掳走后她踏上漫长艰险的寻龙复仇之旅。",
-            posterUrl = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=500&q=80",
-            backdropUrl = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=1000&q=80",
-            videoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
+            episodes = listOf(
+                Episode("正片 1080P", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4")
+            ),
             isFeatured = true
         )
     )
@@ -71,22 +64,14 @@ object MovieRepository {
 
     fun getMovieById(id: String): Movie? = movieCache[id]
 
-    // 从网络获取最新热播影视
     suspend fun fetchLatestMovies(page: Int = 1): List<Movie> = withContext(Dispatchers.IO) {
         val url = "$currentApiEndpoint?ac=detail&pg=$page"
         val movies = requestApi(url)
-        if (movies.isEmpty()) {
-            fallbackMovies
-        } else {
-            movies
-        }
+        if (movies.isEmpty()) fallbackMovies else movies
     }
 
-    // 线上全网搜索影视
     suspend fun searchOnlineMovies(keyword: String): List<Movie> = withContext(Dispatchers.IO) {
-        if (keyword.isBlank()) {
-            return@withContext fetchLatestMovies()
-        }
+        if (keyword.isBlank()) return@withContext fetchLatestMovies()
         val encodedWd = URLEncoder.encode(keyword.trim(), "UTF-8")
         val primaryUrl = "$currentApiEndpoint?ac=detail&wd=$encodedWd"
         var results = requestApi(primaryUrl)
@@ -118,7 +103,7 @@ object MovieRepository {
                 requestMethod = "GET"
                 connectTimeout = 10000
                 readTimeout = 10000
-                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile)")
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 11; Mobile)")
                 setRequestProperty("Accept", "application/json")
             }
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
@@ -141,19 +126,20 @@ object MovieRepository {
                         val remarks = item.optString("vod_remarks", "高清")
                         val playUrlRaw = item.optString("vod_play_url", "")
 
-                        val videoUrl = parsePlayUrl(playUrlRaw)
-                        if (videoUrl.isNotBlank()) {
+                        // 解析所有剧集（多集、全集支持）
+                        val episodes = parseEpisodes(playUrlRaw)
+                        if (episodes.isNotEmpty()) {
                             val movie = Movie(
                                 id = id,
                                 title = title,
                                 category = typeName,
                                 year = year,
-                                rating = 8.5,
+                                rating = 8.8,
                                 duration = remarks,
-                                description = content.ifBlank { "全网精彩热播高清影视，点击立即观看。" },
+                                description = content.ifBlank { "高清精选影视，多集在线极速播放。" },
                                 posterUrl = pic,
                                 backdropUrl = pic,
-                                videoUrl = videoUrl,
+                                episodes = episodes,
                                 isFeatured = (i == 0)
                             )
                             results.add(movie)
@@ -170,25 +156,31 @@ object MovieRepository {
         return results
     }
 
-    private fun parsePlayUrl(raw: String): String {
-        if (raw.isBlank()) return ""
-        val episodes = raw.split("#")
-        for (ep in episodes) {
-            val parts = ep.split("$")
-            val url = if (parts.size > 1) parts[1].trim() else parts[0].trim()
-            if (url.startsWith("http://") || url.startsWith("https://")) {
-                if (url.contains(".m3u8") || url.contains(".mp4")) {
-                    return url
+    // 解析出完整的剧集列表（例如 第01集、第02集...）
+    private fun parseEpisodes(playUrlRaw: String): List<Episode> {
+        if (playUrlRaw.isBlank()) return emptyList()
+        val list = mutableListOf<Episode>()
+
+        // 多个播放源以 $$$ 分割，优先选取包含 m3u8 的高清源
+        val sources = playUrlRaw.split("$$$")
+        val bestSource = sources.firstOrNull { it.contains(".m3u8", ignoreCase = true) } ?: sources.first()
+
+        val episodePairs = bestSource.split("#")
+        for ((index, item) in episodePairs.withIndex()) {
+            val parts = item.split("$")
+            if (parts.size >= 2) {
+                val epName = parts[0].trim()
+                val epUrl = parts[1].trim()
+                if (epUrl.startsWith("http://") || epUrl.startsWith("https://")) {
+                    list.add(Episode(name = if (epName.isBlank()) "第 ${index + 1} 集" else epName, url = epUrl))
+                }
+            } else if (parts.size == 1) {
+                val epUrl = parts[0].trim()
+                if (epUrl.startsWith("http://") || epUrl.startsWith("https://")) {
+                    list.add(Episode(name = "正片 1080P", url = epUrl))
                 }
             }
         }
-        for (ep in episodes) {
-            val parts = ep.split("$")
-            val url = if (parts.size > 1) parts[1].trim() else parts[0].trim()
-            if (url.startsWith("http://") || url.startsWith("https://")) {
-                return url
-            }
-        }
-        return ""
+        return list
     }
 }

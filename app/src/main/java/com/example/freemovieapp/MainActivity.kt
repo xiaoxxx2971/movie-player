@@ -49,19 +49,27 @@ class MainActivity : ComponentActivity() {
                             DetailScreen(
                                 movieId = movieId,
                                 onBackClick = { navController.popBackStack() },
-                                onPlayClick = { id ->
-                                    navController.navigate(Screen.Player.createRoute(id))
+                                onPlayClick = { id, epIndex ->
+                                    navController.navigate("player/$id?epIndex=$epIndex")
                                 }
                             )
                         }
 
                         composable(
-                            route = Screen.Player.route,
-                            arguments = listOf(navArgument("movieId") { type = NavType.StringType })
+                            route = "player/{movieId}?epIndex={epIndex}",
+                            arguments = listOf(
+                                navArgument("movieId") { type = NavType.StringType },
+                                navArgument("epIndex") {
+                                    type = NavType.IntType
+                                    defaultValue = 0
+                                }
+                            )
                         ) { backStackEntry ->
                             val movieId = backStackEntry.arguments?.getString("movieId") ?: ""
+                            val epIndex = backStackEntry.arguments?.getInt("epIndex") ?: 0
                             PlayerScreen(
                                 movieId = movieId,
+                                initialEpisodeIndex = epIndex,
                                 onBackClick = { navController.popBackStack() }
                             )
                         }

@@ -1,7 +1,11 @@
 package com.example.freemovieapp.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -10,13 +14,16 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -27,9 +34,10 @@ import com.example.freemovieapp.ui.theme.*
 fun DetailScreen(
     movieId: String,
     onBackClick: () -> Unit,
-    onPlayClick: (String) -> Unit
+    onPlayClick: (String, Int) -> Unit
 ) {
     val movie = MovieRepository.getMovieById(movieId) ?: return
+    var selectedEpisodeIndex by remember { mutableStateOf(0) }
 
     Box(
         modifier = Modifier
@@ -53,20 +61,18 @@ fun DetailScreen(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
-                // 底部过渡渐变
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(Color.Transparent, DarkBackground),
-                                startY = 100f
+                                startY = 120f
                             )
                         )
                 )
             }
 
-            // 影视详细信息
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -81,9 +87,7 @@ fun DetailScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // 标签栏
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 评分
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -120,15 +124,14 @@ fun DetailScreen(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // 立即播放按钮
+                val currentEpName = movie.episodes.getOrNull(selectedEpisodeIndex)?.name ?: "正片"
                 Button(
-                    onClick = { onPlayClick(movie.id) },
+                    onClick = { onPlayClick(movie.id, selectedEpisodeIndex) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp),
                     shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = NetflixRed
-                    )
+                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed)
                 ) {
                     Icon(
                         imageVector = Icons.Default.PlayArrow,
@@ -137,7 +140,7 @@ fun DetailScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "立即免费播放",
+                        text = "播放 $currentEpName (高清原生流)",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
@@ -145,6 +148,67 @@ fun DetailScreen(
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
+
+                // 选集功能专区
+                if (movie.episodes.isNotEmpty()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "剧集列表",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "共 ${movie.episodes.size} 集",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // 剧集选集卡片网格展示
+                    val gridHeight = if (movie.episodes.size <= 4) 50.dp else if (movie.episodes.size <= 8) 100.dp else 160.dp
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 75.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(gridHeight)
+                    ) {
+                        itemsIndexed(movie.episodes) { index, ep ->
+                            val isSelected = (index == selectedEpisodeIndex)
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isSelected) NetflixRed else DarkSurface)
+                                    .clickable {
+                                        selectedEpisodeIndex = index
+                                        onPlayClick(movie.id, index)
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp)
+                            ) {
+                                Text(
+                                    text = ep.name,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) Color.White else TextSecondary,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
 
                 Text(
                     text = "剧情简介",
@@ -166,7 +230,6 @@ fun DetailScreen(
             }
         }
 
-        // 返回按钮
         IconButton(
             onClick = onBackClick,
             modifier = Modifier
