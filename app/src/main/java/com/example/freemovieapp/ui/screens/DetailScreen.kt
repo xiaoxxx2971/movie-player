@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
@@ -23,6 +24,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -31,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.freemovieapp.data.MovieRepository
 import com.example.freemovieapp.ui.theme.*
+import com.example.freemovieapp.utils.DownloadHelper
 
 @Composable
 fun DetailScreen(
@@ -38,6 +41,7 @@ fun DetailScreen(
     onBackClick: () -> Unit,
     onPlayClick: (String, Int, Int) -> Unit
 ) {
+    val context = LocalContext.current
     val movie = MovieRepository.getMovieById(movieId) ?: return
 
     var selectedSourceIndex by remember { mutableStateOf(0) }
@@ -130,33 +134,73 @@ fun DetailScreen(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // 立即播放按钮
-                val currentEpName = activeEpisodes.getOrNull(selectedEpisodeIndex)?.name ?: "正片"
-                Button(
-                    onClick = { onPlayClick(movie.id, selectedSourceIndex, selectedEpisodeIndex) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed)
+                // 操作按钮组：立即播放 + 离线下载
+                val currentEp = activeEpisodes.getOrNull(selectedEpisodeIndex)
+                val currentEpName = currentEp?.name ?: "正片"
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        tint = Color.White
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "立即播放: $currentEpName",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
+                    Button(
+                        onClick = { onPlayClick(movie.id, selectedSourceIndex, selectedEpisodeIndex) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = NetflixRed)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            tint = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "播放: $currentEpName",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+
+                    // 离线下载按钮
+                    Button(
+                        onClick = {
+                            if (currentEp != null) {
+                                DownloadHelper.downloadVideo(
+                                    context = context,
+                                    movieTitle = movie.title,
+                                    episodeName = currentEpName,
+                                    videoUrl = currentEp.url
+                                )
+                            }
+                        },
+                        modifier = Modifier
+                            .width(110.dp)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurface)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            tint = AccentGold,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "下载",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(18.dp))
 
-                // 线路选择（若有多个播放源，支持切换 1080P / 高清专线）
+                // 线路选择
                 if (movie.sources.size > 1) {
                     Text(
                         text = "播放线路切换",

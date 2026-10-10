@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -39,12 +40,12 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
-    onMovieClick: (String) -> Unit
+    onMovieClick: (String) -> Unit,
+    onNavigateToDownloads: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
 
-    // 初始化时直接复用内存缓存，如果是搜索后返回则直接显示搜索结果，实现 0 秒瞬时返回
     var searchQuery by remember { mutableStateOf(MovieRepository.lastSearchQuery) }
     var selectedCategory by remember { mutableStateOf("全部") }
     var isLoading by remember { mutableStateOf(MovieRepository.cachedHomeMovies.isEmpty() && MovieRepository.cachedSearchResults.isEmpty()) }
@@ -58,7 +59,6 @@ fun HomeScreen(
         )
     }
 
-    // 动态提取分类
     val categories = remember(movieList) {
         listOf("全部") + movieList.map { it.category }.distinct()
     }
@@ -71,7 +71,6 @@ fun HomeScreen(
         }
     }
 
-    // 仅当内存缓存完全为空时才在首次发起网络请求
     LaunchedEffect(Unit) {
         if (movieList.isEmpty()) {
             isLoading = true
@@ -126,6 +125,16 @@ fun HomeScreen(
                     }
                 },
                 actions = {
+                    // 离线管理入口
+                    IconButton(onClick = onNavigateToDownloads) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "下载管理",
+                            tint = AccentGold
+                        )
+                    }
+
+                    // 刷新按钮
                     IconButton(onClick = { forceRefresh() }) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
@@ -146,7 +155,6 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // 搜索输入框
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -210,7 +218,6 @@ fun HomeScreen(
                     )
                 }
             } else {
-                // 顶部推荐 Banner
                 val bannerMovie = movieList.firstOrNull()
                 if (searchQuery.isBlank() && bannerMovie != null) {
                     Box(
@@ -271,7 +278,6 @@ fun HomeScreen(
                     }
                 }
 
-                // 分类栏
                 if (categories.size > 1) {
                     LazyRow(
                         modifier = Modifier
@@ -303,7 +309,6 @@ fun HomeScreen(
                     }
                 }
 
-                // 影视网格
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     contentPadding = PaddingValues(16.dp),

@@ -2,6 +2,7 @@ package com.example.freemovieapp.ui.screens
 
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
@@ -14,7 +15,6 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Layers
@@ -60,6 +61,7 @@ import com.example.freemovieapp.data.MovieRepository
 import com.example.freemovieapp.ui.theme.AccentGold
 import com.example.freemovieapp.ui.theme.DarkSurface
 import com.example.freemovieapp.ui.theme.NetflixRed
+import com.example.freemovieapp.utils.DownloadHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.max
@@ -105,9 +107,8 @@ fun PlayerScreen(
     var showQualityDialog by remember { mutableStateOf(false) }
     var showSourceDialog by remember { mutableStateOf(false) }
 
-    // 沉浸式观影控制：5秒无操作后自动平滑淡出隐藏
     var areControlsVisible by remember { mutableStateOf(true) }
-    var userTouchTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
+    var playerViewInstance by remember { mutableStateOf<PlayerView?>(null) }
 
     // 画面比例模式
     var resizeModeIndex by remember { mutableStateOf(0) }
@@ -122,14 +123,14 @@ fun PlayerScreen(
     val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableStateOf(0) }
 
-    // ExoPlayer 核心配置：开启 HEVC/H.265 优先与 50Mbps 极速带宽探测
+    // ExoPlayer 核心配置
     val trackSelector = remember {
         DefaultTrackSelector(context).apply {
             setParameters(
                 buildUponParameters()
                     .setMaxVideoSize(3840, 2160) // 开放 4K 超清解码
-                    .setForceHighestSupportedBitrate(true) // 强制锁定最高码率
-                    .setPreferredVideoMimeType("video/hevc") // 优先 H.265 原画防色块
+                    .setForceHighestSupportedBitrate(true)
+                    .setPreferredVideoMimeType("video/hevc")
                     .setAllowVideoMixedMimeTypeAdaptiveness(true)
             )
         }
@@ -137,7 +138,7 @@ fun PlayerScreen(
 
     val exoPlayer = remember {
         val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-            .setInitialBitrateEstimate(50_000_000L) // 初始 50Mbps，绝不降级码率
+            .setInitialBitrateEstimate(50_000_000L)
             .build()
 
         val loadControl = DefaultLoadControl.Builder()
@@ -151,18 +152,6 @@ fun PlayerScreen(
             .build().apply {
                 videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
             }
-    }
-
-    LaunchedEffect(areControlsVisible, userTouchTimestamp, showQualityDialog, showSourceDialog) {
-        if (areControlsVisible && !showQualityDialog && !showSourceDialog) {
-            delay(5000L)
-            areControlsVisible = false
-        }
-    }
-
-    fun notifyUserInteraction() {
-        areControlsVisible = true
-        userTouchTimestamp = System.currentTimeMillis()
     }
 
     fun parseVideoQualityTag(width: Int, height: Int): String {
@@ -234,8 +223,6 @@ fun PlayerScreen(
         onBackClick()
     }
 
-    var playerViewInstance by remember { mutableStateOf<PlayerView?>(null) }
-
     LaunchedEffect(resizeModeIndex) {
         playerViewInstance?.resizeMode = resizeModes[resizeModeIndex]
     }
@@ -252,7 +239,6 @@ fun PlayerScreen(
 
     fun executeQualitySwitch(item: QualityOptionItem) {
         coroutineScope.launch {
-            notifyUserInteraction()
             isSwitchingQuality = true
             selectedQualityId = item.id
             selectedQualityDisplayLabel = item.label
@@ -288,7 +274,6 @@ fun PlayerScreen(
 
     fun executeSourceSwitch(sourceIndex: Int) {
         coroutineScope.launch {
-            notifyUserInteraction()
             isSwitchingQuality = true
             val src = movie.sources[sourceIndex]
             switchingQualityMessage = "正在切换至 [${src.name}] 专线，载入中..."
@@ -306,42 +291,50 @@ fun PlayerScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) {
-                areControlsVisible = !areControlsVisible
-                if (areControlsVisible) {
-                    userTouchTimestamp = System.currentTimeMillis()
-                }
-            }
     ) {
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = exoPlayer
                     useController = true
+                    controllerShowTimeoutMs = 5000
                     resizeMode = resizeModes[resizeModeIndex]
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
+
+                    setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
+                        areControlsVisible = (visibility == View.VISIBLE)
+                    })
+
                     playerViewInstance = this
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // 原画超分画质增强层（轻量 GPU 对比度与边缘去雾遮罩）
+        // 触控捕获层：控制栏消退后轻点任意位置立即唤醒
+        if (!areControlsVisible) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable {
+                        playerViewInstance?.showController()
+                        areControlsVisible = true
+                    }
+            )
+        }
+
         if (isVisionBoostEnabled) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0x06FFFFFF)) // 强化高光反差与边缘通透感
+                    .background(Color(0x06FFFFFF))
             )
         }
 
-        // 切换画质时的真实缓冲蒙层
+        // 切换画质缓冲蒙层
         if (isSwitchingQuality) {
             Box(
                 modifier = Modifier
@@ -368,7 +361,7 @@ fun PlayerScreen(
             }
         }
 
-        // 顶部控制与画质指示栏（自然淡入淡出动画，5秒无操作后平滑消退）
+        // 顶部控制栏
         AnimatedVisibility(
             visible = areControlsVisible,
             enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { -it },
@@ -422,14 +415,11 @@ fun PlayerScreen(
                     }
                 }
 
-                // 右上角按钮组
+                // 右上角按钮组：画质 + 增强 + 下载 + 换线 + 倍速 + 比例 + 下一集
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 1. 画质选择按钮
+                    // 1. 画质选择
                     Button(
-                        onClick = {
-                            notifyUserInteraction()
-                            showQualityDialog = true
-                        },
+                        onClick = { showQualityDialog = true },
                         colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
                         shape = RoundedCornerShape(20.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
@@ -449,13 +439,10 @@ fun PlayerScreen(
                         )
                     }
 
-                    // 2. 超分画质增强开关 (Vision Boost)
+                    // 2. 超分画质增强
                     Spacer(modifier = Modifier.width(6.dp))
                     Button(
-                        onClick = {
-                            notifyUserInteraction()
-                            isVisionBoostEnabled = !isVisionBoostEnabled
-                        },
+                        onClick = { isVisionBoostEnabled = !isVisionBoostEnabled },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isVisionBoostEnabled) Color(0x99FFB800) else Color(0x66000000)
                         ),
@@ -470,21 +457,47 @@ fun PlayerScreen(
                         )
                         Spacer(modifier = Modifier.width(2.dp))
                         Text(
-                            text = if (isVisionBoostEnabled) "画质增强" else "增强关",
+                            text = if (isVisionBoostEnabled) "增强开" else "增强关",
                             color = if (isVisionBoostEnabled) Color.Black else Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
 
-                    // 3. 换线按钮
+                    // 3. 离线下载按钮 (新增)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Button(
+                        onClick = {
+                            DownloadHelper.downloadVideo(
+                                context = context,
+                                movieTitle = movie.title,
+                                episodeName = currentEpisode.name,
+                                videoUrl = currentEpisode.url
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
+                        shape = RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "下载",
+                            tint = AccentGold,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            text = "下载",
+                            color = Color.White,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    // 4. 换线按钮
                     if (movie.sources.size > 1) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Button(
-                            onClick = {
-                                notifyUserInteraction()
-                                showSourceDialog = true
-                            },
+                            onClick = { showSourceDialog = true },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
                             shape = RoundedCornerShape(20.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
@@ -506,10 +519,9 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.width(6.dp))
 
-                    // 4. 倍速按钮
+                    // 5. 倍速
                     Button(
                         onClick = {
-                            notifyUserInteraction()
                             currentSpeedIndex = (currentSpeedIndex + 1) % speedOptions.size
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
@@ -532,10 +544,9 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.width(6.dp))
 
-                    // 5. 画面比例
+                    // 6. 画面比例
                     Button(
                         onClick = {
-                            notifyUserInteraction()
                             resizeModeIndex = (resizeModeIndex + 1) % resizeModes.size
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
@@ -556,12 +567,11 @@ fun PlayerScreen(
                         )
                     }
 
-                    // 6. 下一集
+                    // 7. 下一集
                     if (currentEpIndex < episodes.size - 1) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Button(
                             onClick = {
-                                notifyUserInteraction()
                                 currentEpIndex += 1
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0x99E50914)),
@@ -589,10 +599,7 @@ fun PlayerScreen(
 
         // 画质选择弹窗
         if (showQualityDialog) {
-            Dialog(onDismissRequest = {
-                showQualityDialog = false
-                notifyUserInteraction()
-            }) {
+            Dialog(onDismissRequest = { showQualityDialog = false }) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = DarkSurface,
@@ -661,10 +668,7 @@ fun PlayerScreen(
 
         // 线路选择弹窗
         if (showSourceDialog) {
-            Dialog(onDismissRequest = {
-                showSourceDialog = false
-                notifyUserInteraction()
-            }) {
+            Dialog(onDismissRequest = { showSourceDialog = false }) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = DarkSurface,

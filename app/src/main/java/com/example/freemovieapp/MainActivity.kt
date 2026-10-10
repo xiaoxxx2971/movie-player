@@ -1,5 +1,6 @@
 package com.example.freemovieapp
 
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -11,12 +12,17 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.freemovieapp.model.Episode
+import com.example.freemovieapp.model.Movie
+import com.example.freemovieapp.model.VideoSource
 import com.example.freemovieapp.ui.navigation.Screen
 import com.example.freemovieapp.ui.screens.DetailScreen
+import com.example.freemovieapp.ui.screens.DownloadManagerScreen
 import com.example.freemovieapp.ui.screens.HomeScreen
 import com.example.freemovieapp.ui.screens.PlayerScreen
 import com.example.freemovieapp.ui.theme.DarkBackground
 import com.example.freemovieapp.ui.theme.FreeMovieAppTheme
+import java.net.URLDecoder
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,6 +43,21 @@ class MainActivity : ComponentActivity() {
                             HomeScreen(
                                 onMovieClick = { movieId ->
                                     navController.navigate(Screen.Detail.createRoute(movieId))
+                                },
+                                onNavigateToDownloads = {
+                                    navController.navigate("downloads")
+                                }
+                            )
+                        }
+
+                        // 下载管理中心
+                        composable("downloads") {
+                            DownloadManagerScreen(
+                                onBackClick = { navController.popBackStack() },
+                                onPlayLocalVideo = { localPath, title ->
+                                    val encodedPath = Uri.encode(localPath)
+                                    val encodedTitle = Uri.encode(title)
+                                    navController.navigate("local_player?path=$encodedPath&title=$encodedTitle")
                                 }
                             )
                         }
@@ -76,6 +97,45 @@ class MainActivity : ComponentActivity() {
                                 movieId = movieId,
                                 initialSourceIndex = sourceIndex,
                                 initialEpisodeIndex = epIndex,
+                                onBackClick = { navController.popBackStack() }
+                            )
+                        }
+
+                        // 本地离线视频播放器
+                        composable(
+                            route = "local_player?path={path}&title={title}",
+                            arguments = listOf(
+                                navArgument("path") { type = NavType.StringType },
+                                navArgument("title") { type = NavType.StringType }
+                            )
+                        ) { backStackEntry ->
+                            val rawPath = backStackEntry.arguments?.getString("path") ?: ""
+                            val rawTitle = backStackEntry.arguments?.getString("title") ?: ""
+                            val decodedPath = URLDecoder.decode(rawPath, "UTF-8")
+                            val decodedTitle = URLDecoder.decode(rawTitle, "UTF-8")
+
+                            // 构造临时本地 Movie 对象供 PlayerScreen 播放
+                            val localMovie = Movie(
+                                id = "local_temp",
+                                title = decodedTitle,
+                                category = "离线本地视频",
+                                year = "本地",
+                                rating = 10.0,
+                                duration = "本地视频",
+                                description = "本地已下载离线视频，零流量极速播放。",
+                                posterUrl = "",
+                                backdropUrl = "",
+                                sources = listOf(
+                                    VideoSource("本地文件", listOf(Episode("本地播放", decodedPath)))
+                                ),
+                                episodes = listOf(Episode("本地播放", decodedPath))
+                            )
+
+                            com.example.freemovieapp.data.MovieRepository.getMovieById("local_temp") // 确保可索引
+                            PlayerScreen(
+                                movieId = localMovie.id,
+                                initialSourceIndex = 0,
+                                initialEpisodeIndex = 0,
                                 onBackClick = { navController.popBackStack() }
                             )
                         }
