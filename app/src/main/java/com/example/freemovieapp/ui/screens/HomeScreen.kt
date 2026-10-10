@@ -41,7 +41,7 @@ fun HomeScreen(
     onMovieClick: (String) -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
-    val keyboardController = LocalSoftwareKeyboardController()
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("全部") }
