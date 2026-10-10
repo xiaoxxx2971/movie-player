@@ -14,22 +14,22 @@ import java.net.URLEncoder
 
 object MovieRepository {
 
-    // 默认内置高带宽 1080P 高清接口
-    var currentApiEndpoint = "https://cj.lziapi.com/api.php/provide/vod/"
+    // 默认主力切换为业内公认最高码率的「索尼原画蓝光专线」
+    var currentApiEndpoint = "https://suoniapi.com/api.php/provide/vod/"
     private val backupApiEndpoints = listOf(
-        "https://api.bfzyapi.com/api.php/provide/vod/",
-        "https://api.wujinapi.me/api.php/provide/vod/",
+        "https://bfzyapi.com/api.php/provide/vod/",
+        "https://cj.lziapi.com/api.php/provide/vod/",
         "https://caiji.dbzy.tv/api.php/provide/vod/at/json/"
     )
 
-    // 内存缓存：返回首页或搜索时 0 延迟秒开，避免重复转圈
+    // 内存即时缓存
     var cachedHomeMovies: List<Movie> = emptyList()
     var cachedSearchResults: List<Movie> = emptyList()
     var lastSearchQuery: String = ""
 
     private val movieDetailsCache = mutableMapOf<String, Movie>()
 
-    // 本地 4K/1080P 超清演示片单
+    // 本地 4K 超清演示片单
     private val fallbackMovies = listOf(
         Movie(
             id = "fb_1",
@@ -42,7 +42,7 @@ object MovieRepository {
             posterUrl = "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=500&q=80",
             backdropUrl = "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=1000&q=80",
             sources = listOf(
-                VideoSource("1080P 极速蓝光线", listOf(
+                VideoSource("💎 索尼 1080P 蓝光原画线 (高码率推荐)", listOf(
                     Episode("正片 1080P", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"),
                     Episode("预告片", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4")
                 ))
@@ -64,7 +64,7 @@ object MovieRepository {
             posterUrl = "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=500&q=80",
             backdropUrl = "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1000&q=80",
             sources = listOf(
-                VideoSource("1080P 原画线", listOf(
+                VideoSource("💎 索尼 1080P 蓝光原画线", listOf(
                     Episode("正片 1080P", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4")
                 ))
             ),
@@ -81,19 +81,21 @@ object MovieRepository {
 
     fun getMovieById(id: String): Movie? = movieDetailsCache[id]
 
-    // 获取最新热门影视流（支持内存秒回，避免返回时转圈）
     suspend fun fetchLatestMovies(forceRefresh: Boolean = false): List<Movie> = withContext(Dispatchers.IO) {
         if (!forceRefresh && cachedHomeMovies.isNotEmpty()) {
             return@withContext cachedHomeMovies
         }
         val url = "$currentApiEndpoint?ac=detail&pg=1"
-        val movies = requestApi(url)
+        var movies = requestApi(url)
+        if (movies.isEmpty()) {
+            // 如果主力源短暂异常，自动切换暴风高清专线
+            movies = requestApi("https://bfzyapi.com/api.php/provide/vod/?ac=detail&pg=1")
+        }
         val result = if (movies.isEmpty()) fallbackMovies else movies
         cachedHomeMovies = result
         result
     }
 
-    // 线上全网搜索影视（带搜索缓存）
     suspend fun searchOnlineMovies(keyword: String): List<Movie> = withContext(Dispatchers.IO) {
         val trimmed = keyword.trim()
         if (trimmed.isBlank()) {
@@ -161,7 +163,11 @@ object MovieRepository {
                         val playFromRaw = item.optString("vod_play_from", "")
                         val playUrlRaw = item.optString("vod_play_url", "")
 
-                        // 解析多线路与剧集，优先置顶 1080P / 高清蓝光线路
+                        // 智能过滤低质 AI 漫剧或短剧，优先展示长篇正规大作
+                        if (title.contains("AI漫剧", ignoreCase = true) || title.contains("AI短剧", ignoreCase = true)) {
+                            continue
+                        }
+
                         val sources = parseAllSources(playFromRaw, playUrlRaw)
                         if (sources.isNotEmpty()) {
                             val primaryEpisodes = sources.first().episodes
@@ -172,7 +178,7 @@ object MovieRepository {
                                 year = year,
                                 rating = 8.9,
                                 duration = remarks,
-                                description = content.ifBlank { "全网精彩热播高清影视，点击立即观看。" },
+                                description = content.ifBlank { "高码率蓝光超清影视，多线路原生极速播放。" },
                                 posterUrl = pic,
                                 backdropUrl = pic,
                                 sources = sources,
@@ -193,7 +199,6 @@ object MovieRepository {
         return results
     }
 
-    // 解析出全部线路并智能排序（高清蓝光线排在最前）
     private fun parseAllSources(fromRaw: String, urlRaw: String): List<VideoSource> {
         if (urlRaw.isBlank()) return emptyList()
         val fromList = fromRaw.split("$$$").map { it.trim() }
@@ -217,7 +222,7 @@ object MovieRepository {
                 } else if (parts.size == 1) {
                     val epUrl = parts[0].trim()
                     if (epUrl.startsWith("http://") || epUrl.startsWith("https://")) {
-                        episodes.add(Episode(name = "全片 1080P", url = epUrl))
+                        episodes.add(Episode(name = "全片 1080P 蓝光", url = epUrl))
                     }
                 }
             }
@@ -226,12 +231,13 @@ object MovieRepository {
             }
         }
 
-        // 优先级排序：优先包含 1080、m3u8、蓝光、超清的线路
+        // 智能权重排序：让码率最高、无压缩的蓝光原画线路永远排在第一位
         return sourceList.sortedByDescending { src ->
             var score = 0
-            if (src.name.contains("1080", ignoreCase = true)) score += 50
-            if (src.name.contains("蓝光") || src.name.contains("超清")) score += 40
-            if (src.name.contains("量子") || src.name.contains("暴风") || src.name.contains("非凡")) score += 30
+            if (src.name.contains("索尼", ignoreCase = true) || src.name.contains("suoni")) score += 100
+            if (src.name.contains("1080", ignoreCase = true) || src.name.contains("蓝光")) score += 60
+            if (src.name.contains("原画") || src.name.contains("暴风")) score += 50
+            if (src.name.contains("金鹰") || src.name.contains("快看")) score += 40
             if (src.episodes.any { it.url.contains(".m3u8") }) score += 20
             score
         }
@@ -239,12 +245,12 @@ object MovieRepository {
 
     private fun formatSourceName(raw: String): String {
         return when {
-            raw.contains("1080", ignoreCase = true) -> "💎 1080P 超清蓝光线"
-            raw.contains("lz", ignoreCase = true) || raw.contains("量子") -> "⚡ 量子极速高清线"
-            raw.contains("bf", ignoreCase = true) || raw.contains("暴风") -> "🚀 暴风 1080P 专线"
-            raw.contains("ff", ignoreCase = true) || raw.contains("非凡") -> "🔥 非凡高速画质线"
-            raw.contains("wj", ignoreCase = true) || raw.contains("无尽") -> "🌟 无尽高清播放线"
-            else -> "播放线路 ($raw)"
+            raw.contains("suoni", ignoreCase = true) || raw.contains("索尼") -> "💎 索尼 1080P 蓝光原画 (高码率推荐)"
+            raw.contains("bf", ignoreCase = true) || raw.contains("暴风") -> "🚀 暴风 1080P 超清专线"
+            raw.contains("1080", ignoreCase = true) -> "⭐ 1080P 高清蓝光线"
+            raw.contains("jy", ignoreCase = true) || raw.contains("金鹰") -> "🔥 金鹰超清原画线"
+            raw.contains("lz", ignoreCase = true) || raw.contains("量子") -> "⚡ 量子极速备用线"
+            else -> "播放专线 ($raw)"
         }
     }
 }

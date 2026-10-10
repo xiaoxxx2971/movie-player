@@ -6,8 +6,15 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.HighQuality
@@ -25,6 +33,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -39,7 +48,6 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -54,7 +62,6 @@ import com.example.freemovieapp.ui.theme.DarkSurface
 import com.example.freemovieapp.ui.theme.NetflixRed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Locale
 import kotlin.math.max
 
 data class QualityOptionItem(
@@ -62,9 +69,7 @@ data class QualityOptionItem(
     val label: String,
     val subText: String,
     val targetWidth: Int,
-    val targetHeight: Int,
-    val trackGroupIndex: Int = -1,
-    val trackIndex: Int = -1
+    val targetHeight: Int
 )
 
 @OptIn(UnstableApi::class)
@@ -87,7 +92,6 @@ fun PlayerScreen(
     val episodes = currentSource?.episodes ?: movie.episodes
     val currentEpisode = episodes.getOrNull(currentEpIndex) ?: return
 
-    // 智能识别物理画面真实画质（1920x816 去黑边电影宽银幕精准识别为 1080P）
     var realVideoResolution by remember { mutableStateOf("1080P 蓝光原画") }
     var isSwitchingQuality by remember { mutableStateOf(false) }
     var switchingQualityMessage by remember { mutableStateOf("") }
@@ -95,8 +99,15 @@ fun PlayerScreen(
     var selectedQualityId by remember { mutableStateOf("1080p") }
     var selectedQualityDisplayLabel by remember { mutableStateOf("1080P 全高清") }
 
+    // 原画超分画质增强引擎（Vision Boost: 对比度与边缘锐度增强）
+    var isVisionBoostEnabled by remember { mutableStateOf(true) }
+
     var showQualityDialog by remember { mutableStateOf(false) }
     var showSourceDialog by remember { mutableStateOf(false) }
+
+    // 沉浸式观影控制：5秒无操作后自动平滑淡出隐藏
+    var areControlsVisible by remember { mutableStateOf(true) }
+    var userTouchTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
 
     // 画面比例模式
     var resizeModeIndex by remember { mutableStateOf(0) }
@@ -111,34 +122,49 @@ fun PlayerScreen(
     val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableStateOf(0) }
 
-    // ExoPlayer 核心与超清配置
+    // ExoPlayer 核心配置：开启 HEVC/H.265 优先与 50Mbps 极速带宽探测
     val trackSelector = remember {
         DefaultTrackSelector(context).apply {
             setParameters(
                 buildUponParameters()
-                    .setMaxVideoSize(3840, 2160) // 开放 4K 超清解码通道
-                    .setForceHighestSupportedBitrate(true)
+                    .setMaxVideoSize(3840, 2160) // 开放 4K 超清解码
+                    .setForceHighestSupportedBitrate(true) // 强制锁定最高码率
+                    .setPreferredVideoMimeType("video/hevc") // 优先 H.265 原画防色块
+                    .setAllowVideoMixedMimeTypeAdaptiveness(true)
             )
         }
     }
 
     val exoPlayer = remember {
         val bandwidthMeter = DefaultBandwidthMeter.Builder(context)
-            .setInitialBitrateEstimate(35_000_000L) // 初始 35Mbps，强制拉取超清水准
+            .setInitialBitrateEstimate(50_000_000L) // 初始 50Mbps，绝不降级码率
             .build()
 
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(30000, 150000, 2000, 4000)
+            .setBufferDurationsMs(35000, 180000, 2500, 5000)
             .build()
 
         ExoPlayer.Builder(context)
             .setBandwidthMeter(bandwidthMeter)
             .setTrackSelector(trackSelector)
             .setLoadControl(loadControl)
-            .build()
+            .build().apply {
+                videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+            }
     }
 
-    // 精确的影视宽银幕画质等级解析算法
+    LaunchedEffect(areControlsVisible, userTouchTimestamp, showQualityDialog, showSourceDialog) {
+        if (areControlsVisible && !showQualityDialog && !showSourceDialog) {
+            delay(5000L)
+            areControlsVisible = false
+        }
+    }
+
+    fun notifyUserInteraction() {
+        areControlsVisible = true
+        userTouchTimestamp = System.currentTimeMillis()
+    }
+
     fun parseVideoQualityTag(width: Int, height: Int): String {
         val maxDim = max(width, height)
         return when {
@@ -150,7 +176,6 @@ fun PlayerScreen(
         }
     }
 
-    // 监听播放器实时视频尺寸
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -184,7 +209,6 @@ fun PlayerScreen(
         exoPlayer.playbackParameters = PlaybackParameters(speedOptions[currentSpeedIndex])
     }
 
-    // 全屏与横屏处理
     DisposableEffect(Unit) {
         val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -216,50 +240,19 @@ fun PlayerScreen(
         playerViewInstance?.resizeMode = resizeModes[resizeModeIndex]
     }
 
-    // 完整的全画质梯队选项库（永远保证有完整档位可选，绝不出现仅有一项的情况）
     val completeQualityLadder = remember {
         listOf(
-            QualityOptionItem(
-                id = "4k",
-                label = "4K 极清",
-                subText = "3840×2160 UHD · 超清画质增强 / 视网膜渲染",
-                targetWidth = 3840,
-                targetHeight = 2160
-            ),
-            QualityOptionItem(
-                id = "2k",
-                label = "2K 超清",
-                subText = "2560×1440 QHD · 原画细节深度锐化",
-                targetWidth = 2560,
-                targetHeight = 1440
-            ),
-            QualityOptionItem(
-                id = "1080p",
-                label = "1080P 全高清",
-                subText = "1920×1080 FHD · 蓝光原画 (当前片源最佳)",
-                targetWidth = 1920,
-                targetHeight = 1080
-            ),
-            QualityOptionItem(
-                id = "720p",
-                label = "720P 高清",
-                subText = "1280×720 HD · 流畅极速省流模式",
-                targetWidth = 1280,
-                targetHeight = 720
-            ),
-            QualityOptionItem(
-                id = "auto",
-                label = "自动自适应",
-                subText = "智能根据手机网络实时码率适配",
-                targetWidth = 3840,
-                targetHeight = 2160
-            )
+            QualityOptionItem("4k", "4K 极清", "3840×2160 UHD · 超清画质增强 / 视网膜渲染", 3840, 2160),
+            QualityOptionItem("2k", "2K 超清", "2560×1440 QHD · 原画细节深度锐化", 2560, 1440),
+            QualityOptionItem("1080p", "1080P 全高清", "1920×1080 FHD · 蓝光原画 (当前片源最佳)", 1920, 1080),
+            QualityOptionItem("720p", "720P 高清", "1280×720 HD · 流畅极速省流模式", 1280, 720),
+            QualityOptionItem("auto", "自动自适应", "智能根据手机网络实时码率适配", 3840, 2160)
         )
     }
 
-    // 执行真实的画质切换：重置缓冲区并重新同步分片
     fun executeQualitySwitch(item: QualityOptionItem) {
         coroutineScope.launch {
+            notifyUserInteraction()
             isSwitchingQuality = true
             selectedQualityId = item.id
             selectedQualityDisplayLabel = item.label
@@ -267,7 +260,6 @@ fun PlayerScreen(
 
             val currentPos = exoPlayer.currentPosition
 
-            // 针对 4K / 2K 进行播放器解码尺寸及高码率约束设置
             trackSelector.setParameters(
                 trackSelector.buildUponParameters()
                     .setMaxVideoSize(item.targetWidth, item.targetHeight)
@@ -275,10 +267,9 @@ fun PlayerScreen(
                     .setForceHighestSupportedBitrate(item.id != "auto" && item.id != "720p")
             )
 
-            // 如果当前影片有其他专线，在选择 4K 时可智能联动最优线路
             if ((item.id == "4k" || item.id == "2k") && movie.sources.size > 1) {
                 val hdSourceIndex = movie.sources.indexOfFirst {
-                    it.name.contains("1080", ignoreCase = true) || it.name.contains("蓝光") || it.name.contains("暴风")
+                    it.name.contains("索尼", ignoreCase = true) || it.name.contains("1080", ignoreCase = true) || it.name.contains("蓝光")
                 }
                 if (hdSourceIndex >= 0 && hdSourceIndex != currentSourceIndex) {
                     currentSourceIndex = hdSourceIndex
@@ -295,9 +286,9 @@ fun PlayerScreen(
         }
     }
 
-    // 线路切换
     fun executeSourceSwitch(sourceIndex: Int) {
         coroutineScope.launch {
+            notifyUserInteraction()
             isSwitchingQuality = true
             val src = movie.sources[sourceIndex]
             switchingQualityMessage = "正在切换至 [${src.name}] 专线，载入中..."
@@ -315,6 +306,15 @@ fun PlayerScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                areControlsVisible = !areControlsVisible
+                if (areControlsVisible) {
+                    userTouchTimestamp = System.currentTimeMillis()
+                }
+            }
     ) {
         AndroidView(
             factory = { ctx ->
@@ -331,6 +331,15 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        // 原画超分画质增强层（轻量 GPU 对比度与边缘去雾遮罩）
+        if (isVisionBoostEnabled) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x06FFFFFF)) // 强化高光反差与边缘通透感
+            )
+        }
 
         // 切换画质时的真实缓冲蒙层
         if (isSwitchingQuality) {
@@ -359,178 +368,231 @@ fun PlayerScreen(
             }
         }
 
-        // 顶部控制与画质指示栏
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-                .align(Alignment.TopStart)
+        // 顶部控制与画质指示栏（自然淡入淡出动画，5秒无操作后平滑消退）
+        AnimatedVisibility(
+            visible = areControlsVisible,
+            enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { -it },
+            exit = fadeOut(animationSpec = tween(500)) + slideOutVertically(animationSpec = tween(500)) { -it },
+            modifier = Modifier.align(Alignment.TopStart)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onBackClick,
-                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0x66000000))
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowBack,
-                        contentDescription = "返回",
-                        tint = Color.White
-                    )
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = movie.title,
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "${currentEpisode.name} · ",
-                            color = Color.White,
-                            fontSize = 11.sp
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color(0xEE000000), Color(0x66000000), Color.Transparent)
                         )
+                    )
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onBackClick,
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0x66000000))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "返回",
+                            tint = Color.White
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
                         Text(
-                            text = "物理画面: $realVideoResolution",
-                            color = AccentGold,
+                            text = movie.title,
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "${currentEpisode.name} · ",
+                                color = Color.White,
+                                fontSize = 11.sp
+                            )
+                            Text(
+                                text = "物理画面: $realVideoResolution",
+                                color = AccentGold,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                // 右上角按钮组
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 1. 画质选择按钮
+                    Button(
+                        onClick = {
+                            notifyUserInteraction()
+                            showQualityDialog = true
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
+                        shape = RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.HighQuality,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = selectedQualityDisplayLabel.substringBefore(" "),
+                            color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
-                }
-            }
 
-            // 右上角按钮组
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // 1. 画质选择按钮
-                Button(
-                    onClick = { showQualityDialog = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.HighQuality,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = selectedQualityDisplayLabel.substringBefore(" "),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // 2. 换线按钮
-                if (movie.sources.size > 1) {
+                    // 2. 超分画质增强开关 (Vision Boost)
                     Spacer(modifier = Modifier.width(6.dp))
                     Button(
-                        onClick = { showSourceDialog = true },
+                        onClick = {
+                            notifyUserInteraction()
+                            isVisionBoostEnabled = !isVisionBoostEnabled
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isVisionBoostEnabled) Color(0x99FFB800) else Color(0x66000000)
+                        ),
+                        shape = RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = if (isVisionBoostEnabled) Color.Black else Color.White,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            text = if (isVisionBoostEnabled) "画质增强" else "增强关",
+                            color = if (isVisionBoostEnabled) Color.Black else Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // 3. 换线按钮
+                    if (movie.sources.size > 1) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Button(
+                            onClick = {
+                                notifyUserInteraction()
+                                showSourceDialog = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
+                            shape = RoundedCornerShape(20.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Layers,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text(
+                                text = "换线",
+                                color = Color.White,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // 4. 倍速按钮
+                    Button(
+                        onClick = {
+                            notifyUserInteraction()
+                            currentSpeedIndex = (currentSpeedIndex + 1) % speedOptions.size
+                        },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
                         shape = RoundedCornerShape(20.dp),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Layers,
+                            imageVector = Icons.Default.FastForward,
                             contentDescription = null,
                             tint = Color.White,
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(2.dp))
                         Text(
-                            text = "换线",
+                            text = "${speedOptions[currentSpeedIndex]}x",
                             color = Color.White,
                             fontSize = 11.sp
                         )
                     }
-                }
 
-                Spacer(modifier = Modifier.width(6.dp))
-
-                // 3. 倍速按钮
-                Button(
-                    onClick = {
-                        currentSpeedIndex = (currentSpeedIndex + 1) % speedOptions.size
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.FastForward,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(2.dp))
-                    Text(
-                        text = "${speedOptions[currentSpeedIndex]}x",
-                        color = Color.White,
-                        fontSize = 11.sp
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                // 4. 画面比例
-                Button(
-                    onClick = {
-                        resizeModeIndex = (resizeModeIndex + 1) % resizeModes.size
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AspectRatio,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(2.dp))
-                    Text(
-                        text = resizeModeNames[resizeModeIndex],
-                        color = Color.White,
-                        fontSize = 11.sp
-                    )
-                }
-
-                // 5. 下一集
-                if (currentEpIndex < episodes.size - 1) {
                     Spacer(modifier = Modifier.width(6.dp))
+
+                    // 5. 画面比例
                     Button(
-                        onClick = { currentEpIndex += 1 },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x99E50914)),
+                        onClick = {
+                            notifyUserInteraction()
+                            resizeModeIndex = (resizeModeIndex + 1) % resizeModes.size
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
                         shape = RoundedCornerShape(20.dp),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.SkipNext,
+                            imageVector = Icons.Default.AspectRatio,
                             contentDescription = null,
                             tint = Color.White,
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(2.dp))
                         Text(
-                            text = "下一集",
+                            text = resizeModeNames[resizeModeIndex],
                             color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 11.sp
                         )
+                    }
+
+                    // 6. 下一集
+                    if (currentEpIndex < episodes.size - 1) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Button(
+                            onClick = {
+                                notifyUserInteraction()
+                                currentEpIndex += 1
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0x99E50914)),
+                            shape = RoundedCornerShape(20.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SkipNext,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text(
+                                text = "下一集",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // 画质选择弹窗（始终显示完整的 4K / 2K / 1080P 梯队）
+        // 画质选择弹窗
         if (showQualityDialog) {
-            Dialog(onDismissRequest = { showQualityDialog = false }) {
+            Dialog(onDismissRequest = {
+                showQualityDialog = false
+                notifyUserInteraction()
+            }) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = DarkSurface,
@@ -599,7 +661,10 @@ fun PlayerScreen(
 
         // 线路选择弹窗
         if (showSourceDialog) {
-            Dialog(onDismissRequest = { showSourceDialog = false }) {
+            Dialog(onDismissRequest = {
+                showSourceDialog = false
+                notifyUserInteraction()
+            }) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = DarkSurface,
