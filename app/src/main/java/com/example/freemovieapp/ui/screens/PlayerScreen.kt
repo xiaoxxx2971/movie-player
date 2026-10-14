@@ -57,11 +57,11 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.example.freemovieapp.data.DownloadHelper
 import com.example.freemovieapp.data.MovieRepository
 import com.example.freemovieapp.ui.theme.AccentGold
 import com.example.freemovieapp.ui.theme.DarkSurface
 import com.example.freemovieapp.ui.theme.NetflixRed
-import com.example.freemovieapp.utils.DownloadHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.max
@@ -101,7 +101,6 @@ fun PlayerScreen(
     var selectedQualityId by remember { mutableStateOf("1080p") }
     var selectedQualityDisplayLabel by remember { mutableStateOf("1080P 全高清") }
 
-    // 原画超分画质增强引擎（Vision Boost: 对比度与边缘锐度增强）
     var isVisionBoostEnabled by remember { mutableStateOf(true) }
 
     var showQualityDialog by remember { mutableStateOf(false) }
@@ -110,7 +109,6 @@ fun PlayerScreen(
     var areControlsVisible by remember { mutableStateOf(true) }
     var playerViewInstance by remember { mutableStateOf<PlayerView?>(null) }
 
-    // 画面比例模式
     var resizeModeIndex by remember { mutableStateOf(0) }
     val resizeModes = listOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -119,16 +117,14 @@ fun PlayerScreen(
     )
     val resizeModeNames = listOf("默认比例", "裁剪铺满", "拉伸全屏")
 
-    // 倍速播放
     val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableStateOf(0) }
 
-    // ExoPlayer 核心配置
     val trackSelector = remember {
         DefaultTrackSelector(context).apply {
             setParameters(
                 buildUponParameters()
-                    .setMaxVideoSize(3840, 2160) // 开放 4K 超清解码
+                    .setMaxVideoSize(3840, 2160)
                     .setForceHighestSupportedBitrate(true)
                     .setPreferredVideoMimeType("video/hevc")
                     .setAllowVideoMixedMimeTypeAdaptiveness(true)
@@ -314,7 +310,6 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 触控捕获层：控制栏消退后轻点任意位置立即唤醒
         if (!areControlsVisible) {
             Box(
                 modifier = Modifier
@@ -334,7 +329,6 @@ fun PlayerScreen(
             )
         }
 
-        // 切换画质缓冲蒙层
         if (isSwitchingQuality) {
             Box(
                 modifier = Modifier
@@ -361,7 +355,6 @@ fun PlayerScreen(
             }
         }
 
-        // 顶部控制栏
         AnimatedVisibility(
             visible = areControlsVisible,
             enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { -it },
@@ -415,9 +408,7 @@ fun PlayerScreen(
                     }
                 }
 
-                // 右上角按钮组：画质 + 增强 + 下载 + 换线 + 倍速 + 比例 + 下一集
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 1. 画质选择
                     Button(
                         onClick = { showQualityDialog = true },
                         colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
@@ -439,7 +430,6 @@ fun PlayerScreen(
                         )
                     }
 
-                    // 2. 超分画质增强
                     Spacer(modifier = Modifier.width(6.dp))
                     Button(
                         onClick = { isVisionBoostEnabled = !isVisionBoostEnabled },
@@ -464,7 +454,6 @@ fun PlayerScreen(
                         )
                     }
 
-                    // 3. 离线下载按钮 (新增)
                     Spacer(modifier = Modifier.width(6.dp))
                     Button(
                         onClick = {
@@ -493,7 +482,6 @@ fun PlayerScreen(
                         )
                     }
 
-                    // 4. 换线按钮
                     if (movie.sources.size > 1) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Button(
@@ -519,7 +507,6 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.width(6.dp))
 
-                    // 5. 倍速
                     Button(
                         onClick = {
                             currentSpeedIndex = (currentSpeedIndex + 1) % speedOptions.size
@@ -544,7 +531,6 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.width(6.dp))
 
-                    // 6. 画面比例
                     Button(
                         onClick = {
                             resizeModeIndex = (resizeModeIndex + 1) % resizeModes.size
@@ -567,13 +553,10 @@ fun PlayerScreen(
                         )
                     }
 
-                    // 7. 下一集
                     if (currentEpIndex < episodes.size - 1) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Button(
-                            onClick = {
-                                currentEpIndex += 1
-                            },
+                            onClick = { currentEpIndex += 1 },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0x99E50914)),
                             shape = RoundedCornerShape(20.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
@@ -597,7 +580,6 @@ fun PlayerScreen(
             }
         }
 
-        // 画质选择弹窗
         if (showQualityDialog) {
             Dialog(onDismissRequest = { showQualityDialog = false }) {
                 Surface(
@@ -666,7 +648,6 @@ fun PlayerScreen(
             }
         }
 
-        // 线路选择弹窗
         if (showSourceDialog) {
             Dialog(onDismissRequest = { showSourceDialog = false }) {
                 Surface(

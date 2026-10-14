@@ -50,11 +50,10 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // 下载管理中心
                         composable("downloads") {
                             DownloadManagerScreen(
                                 onBackClick = { navController.popBackStack() },
-                                onPlayLocalVideo = { localPath, title ->
+                                onPlayLocalVideo = { localPath: String, title: String ->
                                     val encodedPath = Uri.encode(localPath)
                                     val encodedTitle = Uri.encode(title)
                                     navController.navigate("local_player?path=$encodedPath&title=$encodedTitle")
@@ -101,7 +100,6 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // 本地离线视频播放器
                         composable(
                             route = "local_player?path={path}&title={title}",
                             arguments = listOf(
@@ -114,7 +112,6 @@ class MainActivity : ComponentActivity() {
                             val decodedPath = URLDecoder.decode(rawPath, "UTF-8")
                             val decodedTitle = URLDecoder.decode(rawTitle, "UTF-8")
 
-                            // 构造临时本地 Movie 对象供 PlayerScreen 播放
                             val localMovie = Movie(
                                 id = "local_temp",
                                 title = decodedTitle,
@@ -131,7 +128,7 @@ class MainActivity : ComponentActivity() {
                                 episodes = listOf(Episode("本地播放", decodedPath))
                             )
 
-                            com.example.freemovieapp.data.MovieRepository.getMovieById("local_temp") // 确保可索引
+                            com.example.freemovieapp.data.MovieRepository.getMovieById("local_temp")
                             PlayerScreen(
                                 movieId = localMovie.id,
                                 initialSourceIndex = 0,

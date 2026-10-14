@@ -31,9 +31,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.freemovieapp.data.DownloadHelper
 import com.example.freemovieapp.data.MovieRepository
 import com.example.freemovieapp.ui.theme.*
-import com.example.freemovieapp.utils.DownloadHelper
 
 @Composable
 fun DetailScreen(
@@ -60,7 +60,6 @@ fun DetailScreen(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
         ) {
-            // 顶部海报大图
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -134,7 +133,6 @@ fun DetailScreen(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // 操作按钮组：立即播放 + 离线下载
                 val currentEp = activeEpisodes.getOrNull(selectedEpisodeIndex)
                 val currentEpName = currentEp?.name ?: "正片"
 
@@ -164,7 +162,6 @@ fun DetailScreen(
                         )
                     }
 
-                    // 离线下载按钮
                     Button(
                         onClick = {
                             if (currentEp != null) {
@@ -200,7 +197,6 @@ fun DetailScreen(
 
                 Spacer(modifier = Modifier.height(18.dp))
 
-                // 线路选择
                 if (movie.sources.size > 1) {
                     Text(
                         text = "播放线路切换",
@@ -240,7 +236,6 @@ fun DetailScreen(
                     Spacer(modifier = Modifier.height(16.dp))
                 }
 
-                // 选集功能
                 if (activeEpisodes.isNotEmpty()) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
