@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
@@ -15,6 +16,8 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -36,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -64,6 +68,7 @@ import com.example.freemovieapp.ui.theme.DarkSurface
 import com.example.freemovieapp.ui.theme.NetflixRed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 
 data class QualityOptionItem(
@@ -109,6 +114,10 @@ fun PlayerScreen(
     var areControlsVisible by remember { mutableStateOf(true) }
     var playerViewInstance by remember { mutableStateOf<PlayerView?>(null) }
 
+    // 长按屏幕两侧边缘 2 倍速快进状态
+    var isLongPressFastForwarding by remember { mutableStateOf(false) }
+
+    // 画面比例模式
     var resizeModeIndex by remember { mutableStateOf(0) }
     val resizeModes = listOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -117,9 +126,11 @@ fun PlayerScreen(
     )
     val resizeModeNames = listOf("默认比例", "裁剪铺满", "拉伸全屏")
 
+    // 倍速播放
     val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableStateOf(0) }
 
+    // ExoPlayer 核心配置：开启 50Mbps 初始带宽 + 30秒无缝回退大缓冲 + 硬件解码优化
     val trackSelector = remember {
         DefaultTrackSelector(context).apply {
             setParameters(
@@ -139,6 +150,7 @@ fun PlayerScreen(
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(35000, 180000, 2500, 5000)
+            .setBackBuffer(30000, true) // 启用 30 秒回退缓存，倒退快退 0 缓冲秒播
             .build()
 
         ExoPlayer.Builder(context)
@@ -191,12 +203,18 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(currentSpeedIndex) {
-        exoPlayer.playbackParameters = PlaybackParameters(speedOptions[currentSpeedIndex])
+        if (!isLongPressFastForwarding) {
+            exoPlayer.playbackParameters = PlaybackParameters(speedOptions[currentSpeedIndex])
+        }
     }
 
+    // 核心优化 1：全屏播放期间屏幕永久常亮 (FLAG_KEEP_SCREEN_ON)，绝不黑屏熄屏！
     DisposableEffect(Unit) {
         val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+
+        // 锁定屏幕常亮
+        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         activity?.window?.let { window ->
             val insetsController = WindowCompat.getInsetsController(window, window.decorView)
@@ -207,6 +225,9 @@ fun PlayerScreen(
 
         onDispose {
             activity?.requestedOrientation = originalOrientation
+            // 退出播放器后释放屏幕常亮锁，恢复手机默认息屏设置
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
             activity?.window?.let { window ->
                 val insetsController = WindowCompat.getInsetsController(window, window.decorView)
                 insetsController.show(WindowInsetsCompat.Type.systemBars())
@@ -293,6 +314,7 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = exoPlayer
                     useController = true
+                    keepScreenOn = true // 播放器视图双重保障屏幕常亮
                     controllerShowTimeoutMs = 5000
                     resizeMode = resizeModes[resizeModeIndex]
                     layoutParams = FrameLayout.LayoutParams(
@@ -310,15 +332,91 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        if (!areControlsVisible) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable {
-                        playerViewInstance?.showController()
-                        areControlsVisible = true
+        // 核心优化 2：全屏智能手势交互层
+        // - 点击屏幕中间：唤醒或隐藏控制栏
+        // - 长按屏幕左侧 32% 或右侧 32% 边缘区域：瞬间进入 2.0 倍速快进，手指松开立即恢复原速！
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(currentSpeedIndex) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val totalWidth = size.width
+                        val isEdge = (down.position.x < totalWidth * 0.32f || down.position.x > totalWidth * 0.68f)
+
+                        // 设定 380 毫秒为长按阈值
+                        var isHeld = false
+                        val releasedBeforeTimeout = withTimeoutOrNull(380L) {
+                            var pointer = down
+                            while (pointer.pressed) {
+                                val event = awaitPointerEvent()
+                                pointer = event.changes.firstOrNull { it.id == down.id } ?: break
+                            }
+                            true
+                        }
+
+                        if (releasedBeforeTimeout == null && isEdge) {
+                            // 判定为长按边缘：瞬间启动 2.0 倍速快进！
+                            isHeld = true
+                            isLongPressFastForwarding = true
+                            exoPlayer.playbackParameters = PlaybackParameters(2.0f)
+
+                            // 保持监听直至用户抬起手指
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change == null || !change.pressed) {
+                                    break
+                                }
+                            }
+
+                            // 手指抬起松开：瞬间恢复原本速度！
+                            isLongPressFastForwarding = false
+                            exoPlayer.playbackParameters = PlaybackParameters(speedOptions[currentSpeedIndex])
+                        } else if (releasedBeforeTimeout != null && !isHeld) {
+                            // 短触点击：切换控制栏显示/隐藏
+                            if (areControlsVisible) {
+                                playerViewInstance?.hideController()
+                                areControlsVisible = false
+                            } else {
+                                playerViewInstance?.showController()
+                                areControlsVisible = true
+                            }
+                        }
                     }
-            )
+                }
+        )
+
+        // 长按 2.0X 倍速快进中的视觉 HUD 提示徽章
+        AnimatedVisibility(
+            visible = isLongPressFastForwarding,
+            enter = fadeIn(animationSpec = tween(150)),
+            exit = fadeOut(animationSpec = tween(200)),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 28.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xDD000000))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FastForward,
+                    contentDescription = null,
+                    tint = AccentGold,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "2.0X 极速快进中 · 松手恢复",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         if (isVisionBoostEnabled) {
@@ -355,8 +453,9 @@ fun PlayerScreen(
             }
         }
 
+        // 顶部控制栏
         AnimatedVisibility(
-            visible = areControlsVisible,
+            visible = areControlsVisible && !isLongPressFastForwarding,
             enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { -it },
             exit = fadeOut(animationSpec = tween(500)) + slideOutVertically(animationSpec = tween(500)) { -it },
             modifier = Modifier.align(Alignment.TopStart)
