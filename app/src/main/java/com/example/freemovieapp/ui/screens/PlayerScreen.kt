@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -65,6 +67,7 @@ import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.freemovieapp.data.DownloadHelper
+import com.example.freemovieapp.data.M3u8AdFilter
 import com.example.freemovieapp.data.MovieRepository
 import com.example.freemovieapp.ui.theme.AccentGold
 import com.example.freemovieapp.ui.theme.DarkSurface
@@ -112,28 +115,27 @@ fun PlayerScreen(
 
     var isVisionBoostEnabled by remember { mutableStateOf(true) }
 
+    // 广告拦截状态提示横幅
+    var adFilterBannerText by remember { mutableStateOf("") }
+
     var showQualityDialog by remember { mutableStateOf(false) }
     var showSourceDialog by remember { mutableStateOf(false) }
 
-    // 上下控制栏同步显示与 5 秒自动消退状态
     var areControlsVisible by remember { mutableStateOf(true) }
     var userTouchTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
     var playerViewInstance by remember { mutableStateOf<PlayerView?>(null) }
 
-    // 播放进度与状态
     var currentPositionMs by remember { mutableStateOf(0L) }
     var totalDurationMs by remember { mutableStateOf(0L) }
     var isPlaying by remember { mutableStateOf(true) }
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderPositionMs by remember { mutableStateOf(0L) }
 
-    // 手势状态：长按边缘 2.0X 倍速 & 左右滑动调节进度
     var isLongPressFastForwarding by remember { mutableStateOf(false) }
     var isSeekingGesture by remember { mutableStateOf(false) }
     var gestureSeekPositionMs by remember { mutableStateOf(0L) }
     var gestureSeekDeltaSeconds by remember { mutableStateOf(0) }
 
-    // 画面比例模式
     var resizeModeIndex by remember { mutableStateOf(0) }
     val resizeModes = listOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -142,7 +144,6 @@ fun PlayerScreen(
     )
     val resizeModeNames = listOf("默认比例", "裁剪铺满", "拉伸全屏")
 
-    // 倍速播放
     val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableStateOf(0) }
 
@@ -177,7 +178,6 @@ fun PlayerScreen(
             }
     }
 
-    // 格式化毫秒为 00:00 或 0:00:00
     fun formatTime(ms: Long): String {
         val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
         val hours = totalSeconds / 3600L
@@ -195,7 +195,16 @@ fun PlayerScreen(
         userTouchTimestamp = System.currentTimeMillis()
     }
 
-    // 定时同步播放进度条
+    // 一键跳过广告函数（每次点击直接快进跳过 25 秒贴片广告）
+    fun skipAdNow() {
+        notifyUserInteraction()
+        val dur = totalDurationMs.coerceAtLeast(0L)
+        val target = if (dur > 0) (exoPlayer.currentPosition + 25_000L).coerceAtMost(dur) else exoPlayer.currentPosition + 25_000L
+        exoPlayer.seekTo(target)
+        currentPositionMs = target
+        Toast.makeText(context, "⚡ 已为您快进跳过 25 秒广告片段", Toast.LENGTH_SHORT).show()
+    }
+
     LaunchedEffect(exoPlayer) {
         while (true) {
             if (!isDraggingSlider) {
@@ -210,7 +219,6 @@ fun PlayerScreen(
         }
     }
 
-    // 5 秒无操作自动隐藏上下控制栏
     LaunchedEffect(areControlsVisible, userTouchTimestamp, showQualityDialog, showSourceDialog, isDraggingSlider) {
         if (areControlsVisible && !showQualityDialog && !showSourceDialog && !isDraggingSlider) {
             delay(5000L)
@@ -248,18 +256,26 @@ fun PlayerScreen(
         }
     }
 
-    fun loadMediaStream(seekPositionMs: Long = 0L) {
-        val mediaItem = MediaItem.fromUri(currentEpisode.url)
+    // 载入视频流时自动经过 M3u8AdFilter 净化过滤插播广告
+    suspend fun loadMediaStreamWithAdFilter(seekPositionMs: Long = 0L) {
+        val filtered = M3u8AdFilter.resolveCleanStream(context, currentEpisode.url)
+        val mediaItem = MediaItem.fromUri(filtered.playUrl)
         exoPlayer.setMediaItem(mediaItem)
         if (seekPositionMs > 0) {
             exoPlayer.seekTo(seekPositionMs)
         }
         exoPlayer.prepare()
         exoPlayer.playWhenReady = true
+
+        if (filtered.removedAdSegments > 0) {
+            adFilterBannerText = "🛡️ 净网引擎已自动为您拦截并剔除 ${filtered.removedAdSeconds} 秒插播广告"
+            delay(4000L)
+            adFilterBannerText = ""
+        }
     }
 
     LaunchedEffect(currentSourceIndex, currentEpIndex) {
-        loadMediaStream()
+        loadMediaStreamWithAdFilter()
     }
 
     LaunchedEffect(currentSpeedIndex) {
@@ -268,7 +284,6 @@ fun PlayerScreen(
         }
     }
 
-    // 全屏横屏与屏幕常亮锁
     DisposableEffect(Unit) {
         val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -334,7 +349,7 @@ fun PlayerScreen(
                 }
                 if (hdSourceIndex >= 0 && hdSourceIndex != currentSourceIndex) {
                     currentSourceIndex = hdSourceIndex
-                    loadMediaStream(currentPos)
+                    loadMediaStreamWithAdFilter(currentPos)
                 } else {
                     exoPlayer.seekTo(currentPos)
                 }
@@ -356,9 +371,9 @@ fun PlayerScreen(
             val currentPos = exoPlayer.currentPosition
             currentSourceIndex = sourceIndex
 
+            delay(400)
+            loadMediaStreamWithAdFilter(currentPos)
             delay(800)
-            loadMediaStream(currentPos)
-            delay(1000)
             isSwitchingQuality = false
         }
     }
@@ -368,12 +383,11 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 底层视频画面渲染（关闭原生控制器冲突，改用自定义统一上下 Compose 控制栏）
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = exoPlayer
-                    useController = false // 禁用原生控制器，防止与全屏手势层抢夺焦点
+                    useController = false
                     keepScreenOn = true
                     resizeMode = resizeModes[resizeModeIndex]
                     layoutParams = FrameLayout.LayoutParams(
@@ -386,10 +400,7 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 全屏智能手势层：
-        // 1. 轻触点击 -> 唤醒/隐藏上下进度与控制栏
-        // 2. 左右滑动 -> 丝滑调节视频播放进度
-        // 3. 长按两侧边缘 -> 2.0X 极速快进，松手即恢复
+        // 全屏智能手势层
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -422,11 +433,9 @@ fun PlayerScreen(
 
                             if (!isLongPress2x && !isHorizontalSeeking) {
                                 if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f && duration > 0L) {
-                                    // 触发左右滑动调节进度
                                     isHorizontalSeeking = true
                                     isSeekingGesture = true
                                 } else if (System.currentTimeMillis() - downTime >= 350L && isEdge && abs(dx) <= touchSlop && abs(dy) <= touchSlop) {
-                                    // 触发长按边缘 2.0X 倍速
                                     isLongPress2x = true
                                     isLongPressFastForwarding = true
                                     exoPlayer.playbackParameters = PlaybackParameters(2.0f)
@@ -460,13 +469,44 @@ fun PlayerScreen(
                 }
         )
 
-        // 画质增强视觉滤镜层
         if (isVisionBoostEnabled) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color(0x06FFFFFF))
             )
+        }
+
+        // 自动拦截广告成功提示横幅
+        AnimatedVisibility(
+            visible = adFilterBannerText.isNotEmpty(),
+            enter = fadeIn(animationSpec = tween(250)) + slideInVertically(animationSpec = tween(250)) { -it },
+            exit = fadeOut(animationSpec = tween(300)),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 68.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xDD1B5E20))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Security,
+                    contentDescription = null,
+                    tint = AccentGold,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = adFilterBannerText,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         // 左右滑动调节进度的中心实时预览气泡
@@ -532,7 +572,6 @@ fun PlayerScreen(
             }
         }
 
-        // 切换画质缓冲蒙层
         if (isSwitchingQuality) {
             Box(
                 modifier = Modifier
@@ -559,7 +598,7 @@ fun PlayerScreen(
             }
         }
 
-        // 顶部控制栏（与底部进度控制栏同步淡入淡出）
+        // 顶部控制栏
         AnimatedVisibility(
             visible = areControlsVisible && !isLongPressFastForwarding,
             enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { -it },
@@ -800,7 +839,7 @@ fun PlayerScreen(
             }
         }
 
-        // 底部播放进度控制栏（支持拖动进度条、播放/暂停、快退10秒、快进10秒）
+        // 底部播放进度控制栏（含一键「跳过广告」专属按钮、拖动进度条、播放/暂停、快退/快进10秒）
         AnimatedVisibility(
             visible = areControlsVisible && !isLongPressFastForwarding,
             enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { it },
@@ -818,7 +857,6 @@ fun PlayerScreen(
                     )
                     .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
-                // 播放 / 暂停按钮
                 IconButton(
                     onClick = {
                         notifyUserInteraction()
@@ -837,7 +875,6 @@ fun PlayerScreen(
                     )
                 }
 
-                // 快退 10 秒按钮
                 IconButton(
                     onClick = {
                         notifyUserInteraction()
@@ -854,7 +891,6 @@ fun PlayerScreen(
                     )
                 }
 
-                // 快进 10 秒按钮
                 IconButton(
                     onClick = {
                         notifyUserInteraction()
@@ -874,7 +910,6 @@ fun PlayerScreen(
 
                 Spacer(modifier = Modifier.width(6.dp))
 
-                // 当前播放时间
                 val displayPos = if (isDraggingSlider) sliderPositionMs else currentPositionMs
                 Text(
                     text = formatTime(displayPos),
@@ -883,7 +918,6 @@ fun PlayerScreen(
                     fontWeight = FontWeight.Medium
                 )
 
-                // 可自由拖动的进度条 Slider
                 Slider(
                     value = displayPos.toFloat(),
                     onValueChange = { newVal ->
@@ -908,13 +942,36 @@ fun PlayerScreen(
                         .padding(horizontal = 10.dp)
                 )
 
-                // 视频总时长
                 Text(
                     text = formatTime(totalDurationMs),
                     color = Color(0xFFCCCCCC),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium
                 )
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                // 专属一键「跳过广告」按钮（针对硬压在视频画面里的贴片广告，点击直接跳过 25 秒）
+                Button(
+                    onClick = { skipAdNow() },
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentGold),
+                    shape = RoundedCornerShape(18.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FastForward,
+                        contentDescription = null,
+                        tint = Color.Black,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = "跳过广告",
+                        color = Color.Black,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
             }
         }
 

@@ -31,6 +31,223 @@ data class DownloadedVideoItem(
     val filePath: String
 )
 
+data class FilteredStreamResult(
+    val playUrl: String,
+    val removedAdSeconds: Int,
+    val removedAdSegments: Int
+)
+
+/**
+ * M3U8 切片插播广告净网过滤器
+ * 自动识别并剔除第三方资源站通过 #EXT-X-DISCONTINUITY 注入的博彩/贴片广告分片
+ */
+object M3u8AdFilter {
+
+    private data class SegmentBlock(
+        val lines: MutableList<String> = mutableListOf(),
+        var durationSeconds: Double = 0.0,
+        var segmentCount: Int = 0
+    )
+
+    suspend fun resolveCleanStream(context: Context, originalUrl: String): FilteredStreamResult = withContext(Dispatchers.IO) {
+        if (!originalUrl.contains(".m3u8", ignoreCase = true) || originalUrl.startsWith("file://") || originalUrl.startsWith("/")) {
+            return@withContext FilteredStreamResult(originalUrl, 0, 0)
+        }
+
+        try {
+            var currentUrl = originalUrl
+            var content = fetchText(currentUrl) ?: return@withContext FilteredStreamResult(originalUrl, 0, 0)
+
+            // 如果是主索引 (Master Playlist)，解析出最高画质的子索引地址
+            if (content.contains("#EXT-X-STREAM-INF")) {
+                val subUrl = extractBestVariantUrl(currentUrl, content)
+                if (subUrl != null) {
+                    currentUrl = subUrl
+                    content = fetchText(currentUrl) ?: return@withContext FilteredStreamResult(originalUrl, 0, 0)
+                }
+            }
+
+            // 如果没有 #EXT-X-DISCONTINUITY 标签，说明没有分段插播广告，直接返回原地址保证0风险
+            if (!content.contains("#EXT-X-DISCONTINUITY")) {
+                return@withContext FilteredStreamResult(originalUrl, 0, 0)
+            }
+
+            val baseUrl = URL(currentUrl)
+            val lines = content.lines()
+            val headerLines = mutableListOf<String>()
+            val blocks = mutableListOf<SegmentBlock>()
+            var currentBlock = SegmentBlock()
+            var inBody = false
+
+            for (rawLine in lines) {
+                val line = rawLine.trim()
+                if (line.isEmpty()) continue
+
+                if (line.startsWith("#EXT-X-DISCONTINUITY")) {
+                    inBody = true
+                    if (currentBlock.segmentCount > 0 || currentBlock.lines.isNotEmpty()) {
+                        blocks.add(currentBlock)
+                        currentBlock = SegmentBlock()
+                    }
+                    continue
+                }
+
+                if (!inBody && (line.startsWith("#EXTINF") || line.startsWith("#EXT-X-KEY") || !line.startsWith("#"))) {
+                    inBody = true
+                }
+
+                if (!inBody) {
+                    if (!line.startsWith("#EXT-X-ENDLIST")) {
+                        headerLines.add(line)
+                    }
+                } else {
+                    if (line.startsWith("#EXT-X-ENDLIST")) {
+                        continue
+                    } else if (line.startsWith("#EXTINF:")) {
+                        val durStr = line.removePrefix("#EXTINF:").substringBefore(",").trim()
+                        val dur = durStr.toDoubleOrNull() ?: 0.0
+                        currentBlock.durationSeconds += dur
+                        currentBlock.lines.add(line)
+                    } else if (line.startsWith("#EXT-X-KEY:")) {
+                        // 将加密密钥相对路径转换为绝对路径
+                        val resolvedKeyLine = resolveKeyUri(baseUrl, line)
+                        currentBlock.lines.add(resolvedKeyLine)
+                    } else if (line.startsWith("#")) {
+                        currentBlock.lines.add(line)
+                    } else {
+                        // 视频分片路径转换为绝对 URL
+                        val absSegUrl = URL(baseUrl, line).toString()
+                        currentBlock.lines.add(absSegUrl)
+                        currentBlock.segmentCount += 1
+                    }
+                }
+            }
+
+            if (currentBlock.segmentCount > 0 || currentBlock.lines.isNotEmpty()) {
+                blocks.add(currentBlock)
+            }
+
+            val totalDuration = blocks.sumOf { it.durationSeconds }
+            // 仅当整部影片总时长大于 120 秒时，剔除时长在 1~50 秒之间的短促插播广告块
+            if (totalDuration <= 120.0 || blocks.size <= 1) {
+                return@withContext FilteredStreamResult(originalUrl, 0, 0)
+            }
+
+            var removedSec = 0.0
+            var removedSegs = 0
+            val cleanBlocks = mutableListOf<SegmentBlock>()
+
+            for (b in blocks) {
+                val hasAdKeyword = b.lines.any {
+                    it.contains("ad_", ignoreCase = true) ||
+                    it.contains("/ad/", ignoreCase = true) ||
+                    it.contains("adjump", ignoreCase = true)
+                }
+                val isShortAdBlock = (b.durationSeconds in 1.0..50.0 && b.segmentCount <= 20)
+
+                if (hasAdKeyword || isShortAdBlock) {
+                    removedSec += b.durationSeconds
+                    removedSegs += b.segmentCount
+                } else {
+                    cleanBlocks.add(b)
+                }
+            }
+
+            if (removedSegs == 0 || cleanBlocks.isEmpty()) {
+                return@withContext FilteredStreamResult(originalUrl, 0, 0)
+            }
+
+            // 组装净化后的本地 M3U8 文件
+            val sb = StringBuilder()
+            for (h in headerLines) {
+                sb.append(h).append("\n")
+            }
+            for ((idx, b) in cleanBlocks.withIndex()) {
+                if (idx > 0) {
+                    sb.append("#EXT-X-DISCONTINUITY\n")
+                }
+                for (l in b.lines) {
+                    sb.append(l).append("\n")
+                }
+            }
+            sb.append("#EXT-X-ENDLIST\n")
+
+            // 清理旧缓存文件
+            context.cacheDir.listFiles()?.forEach { f ->
+                if (f.name.startsWith("clean_vod_") && f.name.endsWith(".m3u8")) {
+                    f.delete()
+                }
+            }
+
+            val cleanFile = File(context.cacheDir, "clean_vod_${System.currentTimeMillis()}.m3u8")
+            cleanFile.writeText(sb.toString(), Charsets.UTF_8)
+
+            FilteredStreamResult(
+                playUrl = Uri.fromFile(cleanFile).toString(),
+                removedAdSeconds = removedSec.toInt().coerceAtLeast(1),
+                removedAdSegments = removedSegs
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            FilteredStreamResult(originalUrl, 0, 0)
+        }
+    }
+
+    private fun extractBestVariantUrl(masterUrl: String, content: String): String? {
+        val base = URL(masterUrl)
+        val lines = content.lines()
+        var bestBandwidth = -1L
+        var bestUrl: String? = null
+        var pendingBandwidth = 0L
+
+        for (raw in lines) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                val bwMatch = Regex("BANDWIDTH=(\\d+)").find(line)
+                pendingBandwidth = bwMatch?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 1L
+            } else if (!line.startsWith("#")) {
+                val resolved = URL(base, line).toString()
+                if (pendingBandwidth >= bestBandwidth) {
+                    bestBandwidth = pendingBandwidth
+                    bestUrl = resolved
+                }
+                pendingBandwidth = 0L
+            }
+        }
+        return bestUrl
+    }
+
+    private fun resolveKeyUri(baseUrl: URL, keyLine: String): String {
+        val regex = Regex("URI=\"([^\"]+)\"")
+        val match = regex.find(keyLine) ?: return keyLine
+        val rawUri = match.groupValues[1]
+        if (rawUri.startsWith("http://") || rawUri.startsWith("https://")) return keyLine
+        val absUri = URL(baseUrl, rawUri).toString()
+        return keyLine.replace("URI=\"$rawUri\"", "URI=\"$absUri\"")
+    }
+
+    private fun fetchText(urlString: String): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            val url = URL(urlString)
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 12; Mobile)")
+            }
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use { it.readText() }
+            } else null
+        } catch (e: Exception) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+}
+
 object DownloadHelper {
 
     fun downloadVideo(context: Context, movieTitle: String, episodeName: String, videoUrl: String) {
