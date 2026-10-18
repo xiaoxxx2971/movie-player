@@ -2,7 +2,6 @@ package com.example.freemovieapp.ui.screens
 
 import android.app.Activity
 import android.content.pm.ActivityInfo
-import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -29,8 +28,12 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -68,7 +71,8 @@ import com.example.freemovieapp.ui.theme.DarkSurface
 import com.example.freemovieapp.ui.theme.NetflixRed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
 
 data class QualityOptionItem(
@@ -111,11 +115,23 @@ fun PlayerScreen(
     var showQualityDialog by remember { mutableStateOf(false) }
     var showSourceDialog by remember { mutableStateOf(false) }
 
+    // 上下控制栏同步显示与 5 秒自动消退状态
     var areControlsVisible by remember { mutableStateOf(true) }
+    var userTouchTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
     var playerViewInstance by remember { mutableStateOf<PlayerView?>(null) }
 
-    // 长按屏幕两侧边缘 2 倍速快进状态
+    // 播放进度与状态
+    var currentPositionMs by remember { mutableStateOf(0L) }
+    var totalDurationMs by remember { mutableStateOf(0L) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    var sliderPositionMs by remember { mutableStateOf(0L) }
+
+    // 手势状态：长按边缘 2.0X 倍速 & 左右滑动调节进度
     var isLongPressFastForwarding by remember { mutableStateOf(false) }
+    var isSeekingGesture by remember { mutableStateOf(false) }
+    var gestureSeekPositionMs by remember { mutableStateOf(0L) }
+    var gestureSeekDeltaSeconds by remember { mutableStateOf(0) }
 
     // 画面比例模式
     var resizeModeIndex by remember { mutableStateOf(0) }
@@ -130,7 +146,6 @@ fun PlayerScreen(
     val speedOptions = listOf(1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableStateOf(0) }
 
-    // ExoPlayer 核心配置：开启 50Mbps 初始带宽 + 30秒无缝回退大缓冲 + 硬件解码优化
     val trackSelector = remember {
         DefaultTrackSelector(context).apply {
             setParameters(
@@ -150,7 +165,7 @@ fun PlayerScreen(
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(35000, 180000, 2500, 5000)
-            .setBackBuffer(30000, true) // 启用 30 秒回退缓存，倒退快退 0 缓冲秒播
+            .setBackBuffer(30000, true)
             .build()
 
         ExoPlayer.Builder(context)
@@ -160,6 +175,47 @@ fun PlayerScreen(
             .build().apply {
                 videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
             }
+    }
+
+    // 格式化毫秒为 00:00 或 0:00:00
+    fun formatTime(ms: Long): String {
+        val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
+        val seconds = totalSeconds % 60L
+        return if (hours > 0) {
+            String.format(Locale.getDefault(), "%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+        }
+    }
+
+    fun notifyUserInteraction() {
+        areControlsVisible = true
+        userTouchTimestamp = System.currentTimeMillis()
+    }
+
+    // 定时同步播放进度条
+    LaunchedEffect(exoPlayer) {
+        while (true) {
+            if (!isDraggingSlider) {
+                currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+            }
+            val dur = exoPlayer.duration
+            if (dur > 0) {
+                totalDurationMs = dur
+            }
+            isPlaying = exoPlayer.isPlaying
+            delay(400L)
+        }
+    }
+
+    // 5 秒无操作自动隐藏上下控制栏
+    LaunchedEffect(areControlsVisible, userTouchTimestamp, showQualityDialog, showSourceDialog, isDraggingSlider) {
+        if (areControlsVisible && !showQualityDialog && !showSourceDialog && !isDraggingSlider) {
+            delay(5000L)
+            areControlsVisible = false
+        }
     }
 
     fun parseVideoQualityTag(width: Int, height: Int): String {
@@ -180,6 +236,10 @@ fun PlayerScreen(
                     val tag = parseVideoQualityTag(videoSize.width, videoSize.height)
                     realVideoResolution = "$tag (${videoSize.width}×${videoSize.height})"
                 }
+            }
+
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
             }
         }
         exoPlayer.addListener(listener)
@@ -208,12 +268,10 @@ fun PlayerScreen(
         }
     }
 
-    // 核心优化 1：全屏播放期间屏幕永久常亮 (FLAG_KEEP_SCREEN_ON)，绝不黑屏熄屏！
+    // 全屏横屏与屏幕常亮锁
     DisposableEffect(Unit) {
         val originalOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-
-        // 锁定屏幕常亮
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         activity?.window?.let { window ->
@@ -225,7 +283,6 @@ fun PlayerScreen(
 
         onDispose {
             activity?.requestedOrientation = originalOrientation
-            // 退出播放器后释放屏幕常亮锁，恢复手机默认息屏设置
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
             activity?.window?.let { window ->
@@ -256,6 +313,7 @@ fun PlayerScreen(
 
     fun executeQualitySwitch(item: QualityOptionItem) {
         coroutineScope.launch {
+            notifyUserInteraction()
             isSwitchingQuality = true
             selectedQualityId = item.id
             selectedQualityDisplayLabel = item.label
@@ -291,6 +349,7 @@ fun PlayerScreen(
 
     fun executeSourceSwitch(sourceIndex: Int) {
         coroutineScope.launch {
+            notifyUserInteraction()
             isSwitchingQuality = true
             val src = movie.sources[sourceIndex]
             switchingQualityMessage = "正在切换至 [${src.name}] 专线，载入中..."
@@ -309,83 +368,137 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
+        // 底层视频画面渲染（关闭原生控制器冲突，改用自定义统一上下 Compose 控制栏）
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = exoPlayer
-                    useController = true
-                    keepScreenOn = true // 播放器视图双重保障屏幕常亮
-                    controllerShowTimeoutMs = 5000
+                    useController = false // 禁用原生控制器，防止与全屏手势层抢夺焦点
+                    keepScreenOn = true
                     resizeMode = resizeModes[resizeModeIndex]
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-
-                    setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
-                        areControlsVisible = (visibility == View.VISIBLE)
-                    })
-
                     playerViewInstance = this
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // 核心优化 2：全屏智能手势交互层
-        // - 点击屏幕中间：唤醒或隐藏控制栏
-        // - 长按屏幕左侧 32% 或右侧 32% 边缘区域：瞬间进入 2.0 倍速快进，手指松开立即恢复原速！
+        // 全屏智能手势层：
+        // 1. 轻触点击 -> 唤醒/隐藏上下进度与控制栏
+        // 2. 左右滑动 -> 丝滑调节视频播放进度
+        // 3. 长按两侧边缘 -> 2.0X 极速快进，松手即恢复
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(currentSpeedIndex) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
-                        val totalWidth = size.width
-                        val isEdge = (down.position.x < totalWidth * 0.32f || down.position.x > totalWidth * 0.68f)
+                        val startX = down.position.x
+                        val startY = down.position.y
+                        val totalWidth = size.width.toFloat().coerceAtLeast(1f)
+                        val isEdge = (startX < totalWidth * 0.32f || startX > totalWidth * 0.68f)
+                        val touchSlop = viewConfiguration.touchSlop
 
-                        // 设定 380 毫秒为长按阈值
-                        var isHeld = false
-                        val releasedBeforeTimeout = withTimeoutOrNull(380L) {
-                            var pointer = down
-                            while (pointer.pressed) {
-                                val event = awaitPointerEvent()
-                                pointer = event.changes.firstOrNull { it.id == down.id } ?: break
-                            }
-                            true
-                        }
+                        var isLongPress2x = false
+                        var isHorizontalSeeking = false
+                        val seekStartPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        val duration = exoPlayer.duration.coerceAtLeast(0L)
+                        var targetSeekPos = seekStartPos
 
-                        if (releasedBeforeTimeout == null && isEdge) {
-                            // 判定为长按边缘：瞬间启动 2.0 倍速快进！
-                            isHeld = true
-                            isLongPressFastForwarding = true
-                            exoPlayer.playbackParameters = PlaybackParameters(2.0f)
+                        val downTime = System.currentTimeMillis()
+                        var currentPointer = down
 
-                            // 保持监听直至用户抬起手指
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == down.id }
-                                if (change == null || !change.pressed) {
-                                    break
+                        while (currentPointer.pressed) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            currentPointer = change
+                            if (!change.pressed) break
+
+                            val dx = change.position.x - startX
+                            val dy = change.position.y - startY
+
+                            if (!isLongPress2x && !isHorizontalSeeking) {
+                                if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f && duration > 0L) {
+                                    // 触发左右滑动调节进度
+                                    isHorizontalSeeking = true
+                                    isSeekingGesture = true
+                                } else if (System.currentTimeMillis() - downTime >= 350L && isEdge && abs(dx) <= touchSlop && abs(dy) <= touchSlop) {
+                                    // 触发长按边缘 2.0X 倍速
+                                    isLongPress2x = true
+                                    isLongPressFastForwarding = true
+                                    exoPlayer.playbackParameters = PlaybackParameters(2.0f)
                                 }
                             }
 
-                            // 手指抬起松开：瞬间恢复原本速度！
+                            if (isHorizontalSeeking && duration > 0L) {
+                                val deltaMs = ((dx / totalWidth) * 90_000L).toLong()
+                                targetSeekPos = (seekStartPos + deltaMs).coerceIn(0L, duration)
+                                gestureSeekPositionMs = targetSeekPos
+                                gestureSeekDeltaSeconds = (deltaMs / 1000L).toInt()
+                                change.consume()
+                            }
+                        }
+
+                        if (isLongPress2x) {
                             isLongPressFastForwarding = false
                             exoPlayer.playbackParameters = PlaybackParameters(speedOptions[currentSpeedIndex])
-                        } else if (releasedBeforeTimeout != null && !isHeld) {
-                            // 短触点击：切换控制栏显示/隐藏
+                        } else if (isHorizontalSeeking) {
+                            isSeekingGesture = false
+                            exoPlayer.seekTo(targetSeekPos)
+                            currentPositionMs = targetSeekPos
+                            userTouchTimestamp = System.currentTimeMillis()
+                        } else {
+                            areControlsVisible = !areControlsVisible
                             if (areControlsVisible) {
-                                playerViewInstance?.hideController()
-                                areControlsVisible = false
-                            } else {
-                                playerViewInstance?.showController()
-                                areControlsVisible = true
+                                userTouchTimestamp = System.currentTimeMillis()
                             }
                         }
                     }
                 }
         )
+
+        // 画质增强视觉滤镜层
+        if (isVisionBoostEnabled) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x06FFFFFF))
+            )
+        }
+
+        // 左右滑动调节进度的中心实时预览气泡
+        AnimatedVisibility(
+            visible = isSeekingGesture,
+            enter = fadeIn(animationSpec = tween(100)),
+            exit = fadeOut(animationSpec = tween(150)),
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xDD000000))
+                    .padding(horizontal = 22.dp, vertical = 14.dp)
+            ) {
+                val sign = if (gestureSeekDeltaSeconds >= 0) "+" else ""
+                Text(
+                    text = "${formatTime(gestureSeekPositionMs)} / ${formatTime(totalDurationMs)}",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "进度调节 (${sign}${gestureSeekDeltaSeconds}秒)",
+                    color = AccentGold,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
 
         // 长按 2.0X 倍速快进中的视觉 HUD 提示徽章
         AnimatedVisibility(
@@ -419,14 +532,7 @@ fun PlayerScreen(
             }
         }
 
-        if (isVisionBoostEnabled) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0x06FFFFFF))
-            )
-        }
-
+        // 切换画质缓冲蒙层
         if (isSwitchingQuality) {
             Box(
                 modifier = Modifier
@@ -453,7 +559,7 @@ fun PlayerScreen(
             }
         }
 
-        // 顶部控制栏
+        // 顶部控制栏（与底部进度控制栏同步淡入淡出）
         AnimatedVisibility(
             visible = areControlsVisible && !isLongPressFastForwarding,
             enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { -it },
@@ -509,7 +615,10 @@ fun PlayerScreen(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Button(
-                        onClick = { showQualityDialog = true },
+                        onClick = {
+                            notifyUserInteraction()
+                            showQualityDialog = true
+                        },
                         colors = ButtonDefaults.buttonColors(containerColor = NetflixRed),
                         shape = RoundedCornerShape(20.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
@@ -531,7 +640,10 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.width(6.dp))
                     Button(
-                        onClick = { isVisionBoostEnabled = !isVisionBoostEnabled },
+                        onClick = {
+                            notifyUserInteraction()
+                            isVisionBoostEnabled = !isVisionBoostEnabled
+                        },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isVisionBoostEnabled) Color(0x99FFB800) else Color(0x66000000)
                         ),
@@ -556,6 +668,7 @@ fun PlayerScreen(
                     Spacer(modifier = Modifier.width(6.dp))
                     Button(
                         onClick = {
+                            notifyUserInteraction()
                             DownloadHelper.downloadVideo(
                                 context = context,
                                 movieTitle = movie.title,
@@ -584,7 +697,10 @@ fun PlayerScreen(
                     if (movie.sources.size > 1) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Button(
-                            onClick = { showSourceDialog = true },
+                            onClick = {
+                                notifyUserInteraction()
+                                showSourceDialog = true
+                            },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
                             shape = RoundedCornerShape(20.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
@@ -608,6 +724,7 @@ fun PlayerScreen(
 
                     Button(
                         onClick = {
+                            notifyUserInteraction()
                             currentSpeedIndex = (currentSpeedIndex + 1) % speedOptions.size
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
@@ -632,6 +749,7 @@ fun PlayerScreen(
 
                     Button(
                         onClick = {
+                            notifyUserInteraction()
                             resizeModeIndex = (resizeModeIndex + 1) % resizeModes.size
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0x66000000)),
@@ -655,7 +773,10 @@ fun PlayerScreen(
                     if (currentEpIndex < episodes.size - 1) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Button(
-                            onClick = { currentEpIndex += 1 },
+                            onClick = {
+                                notifyUserInteraction()
+                                currentEpIndex += 1
+                            },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0x99E50914)),
                             shape = RoundedCornerShape(20.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
@@ -676,6 +797,124 @@ fun PlayerScreen(
                         }
                     }
                 }
+            }
+        }
+
+        // 底部播放进度控制栏（支持拖动进度条、播放/暂停、快退10秒、快进10秒）
+        AnimatedVisibility(
+            visible = areControlsVisible && !isLongPressFastForwarding,
+            enter = fadeIn(animationSpec = tween(300)) + slideInVertically(animationSpec = tween(300)) { it },
+            exit = fadeOut(animationSpec = tween(500)) + slideOutVertically(animationSpec = tween(500)) { it },
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, Color(0x88000000), Color(0xEE000000))
+                        )
+                    )
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                // 播放 / 暂停按钮
+                IconButton(
+                    onClick = {
+                        notifyUserInteraction()
+                        if (exoPlayer.isPlaying) {
+                            exoPlayer.pause()
+                        } else {
+                            exoPlayer.play()
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (isPlaying) "暂停" else "播放",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                // 快退 10 秒按钮
+                IconButton(
+                    onClick = {
+                        notifyUserInteraction()
+                        val target = (exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L)
+                        exoPlayer.seekTo(target)
+                        currentPositionMs = target
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Replay10,
+                        contentDescription = "快退10秒",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                // 快进 10 秒按钮
+                IconButton(
+                    onClick = {
+                        notifyUserInteraction()
+                        val dur = totalDurationMs.coerceAtLeast(0L)
+                        val target = if (dur > 0) (exoPlayer.currentPosition + 10_000L).coerceAtMost(dur) else exoPlayer.currentPosition + 10_000L
+                        exoPlayer.seekTo(target)
+                        currentPositionMs = target
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Forward10,
+                        contentDescription = "快进10秒",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // 当前播放时间
+                val displayPos = if (isDraggingSlider) sliderPositionMs else currentPositionMs
+                Text(
+                    text = formatTime(displayPos),
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+
+                // 可自由拖动的进度条 Slider
+                Slider(
+                    value = displayPos.toFloat(),
+                    onValueChange = { newVal ->
+                        isDraggingSlider = true
+                        sliderPositionMs = newVal.toLong()
+                        notifyUserInteraction()
+                    },
+                    onValueChangeFinished = {
+                        exoPlayer.seekTo(sliderPositionMs)
+                        currentPositionMs = sliderPositionMs
+                        isDraggingSlider = false
+                        notifyUserInteraction()
+                    },
+                    valueRange = 0f..(totalDurationMs.coerceAtLeast(1L).toFloat()),
+                    colors = SliderDefaults.colors(
+                        thumbColor = NetflixRed,
+                        activeTrackColor = NetflixRed,
+                        inactiveTrackColor = Color(0x55FFFFFF)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 10.dp)
+                )
+
+                // 视频总时长
+                Text(
+                    text = formatTime(totalDurationMs),
+                    color = Color(0xFFCCCCCC),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
             }
         }
 
